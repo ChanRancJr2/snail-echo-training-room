@@ -1,0 +1,156 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import pg from 'pg';
+import { createApp } from '../src/app.ts';
+import { PgSessionStore } from '../src/session-store-pg.ts';
+import { PgRoomStore } from '../src/rooms.ts';
+import { PgRoundStore } from '../src/rounds.ts';
+import { PgUploadStore } from '../src/uploads.ts';
+import type { AudioStorage } from '../src/audio-storage.ts';
+import { TextCipher } from '../src/crypto.ts';
+import { PgPointStore } from '../src/points.ts';
+import { PgComparisonStore } from '../src/comparisons.ts';
+import { PgReviewStore } from '../src/reviews.ts';
+import { randomBytes } from 'node:crypto';
+
+const url = process.env.DATABASE_URL;
+if (!url) throw new Error('DATABASE_URL is required');
+const origin = 'http://localhost:3100';
+
+class FakeStorage implements AudioStorage {
+  readonly files = new Map<string, { bytes: number; mimeType: string; invalid?: boolean }>();
+  async uploadUrl(key: string) { return `https://storage.test/${key}`; }
+  async downloadUrl(key: string) { return `https://storage.test/${key}?signed=1`; }
+  async inspect(key: string) { return this.files.get(key) ?? null; }
+  async prefix(key: string) { return this.files.get(key)?.invalid ? Buffer.from('not audio') : Buffer.from('1a45dfa3000000000000000000000000', 'hex'); }
+}
+
+test('speaker and listener uploads are verified, role-bound and idempotent across API instances', async () => {
+  const pool = new pg.Pool({ connectionString: url, max: 10 });
+  const storage = new FakeStorage();
+  const rooms = new PgRoomStore(pool);
+  const rounds = new PgRoundStore(pool);
+  const cipher = new TextCipher(randomBytes(32).toString('base64'));
+  const points = new PgPointStore(pool, cipher);
+  const comparisons = new PgComparisonStore(pool, cipher);
+  const reviews = new PgReviewStore(pool);
+  const deps = { sessions: new PgSessionStore(pool), rooms, rounds, points, comparisons, reviews, uploads: new PgUploadStore(pool, storage), publicOrigin: origin, production: false, ready: async () => true };
+  const a = await createApp(deps);
+  const b = await createApp(deps);
+  const post = (app: typeof a, path: string, cookie: string | undefined, payload: object) => app.inject({ method: 'POST', url: path, headers: { origin, ...(cookie ? { cookie } : {}) }, payload });
+  try {
+    const hostCookie = (await post(a, '/api/sessions/anonymous', undefined, {})).headers['set-cookie'] as string;
+    const guestCookie = (await post(b, '/api/sessions/anonymous', undefined, {})).headers['set-cookie'] as string;
+    const created = (await post(a, '/api/rooms', hostCookie, { mode: 'sync', createKey: crypto.randomUUID() })).json();
+    const id = created.state.id;
+    await post(b, '/api/rooms/join', guestCookie, { token: created.inviteToken });
+    await post(a, `/api/rooms/${id}/ready`, hostCookie, { ready: true });
+    await post(b, `/api/rooms/${id}/ready`, guestCookie, { ready: true });
+    const started = (await post(a, `/api/rooms/${id}/start`, hostCookie, {})).json();
+    const roundId = started.roundId;
+    await post(a, `/api/rounds/${roundId}/task`, hostCookie, { expectedVersion: 1 });
+    const abandoned = (await post(a, `/api/rounds/${roundId}/uploads`, hostCookie, { kind: 'speaker', mimeType: 'audio/webm', byteSize: 100, idempotencyKey: crypto.randomUUID() })).json();
+    const restarted = await post(a, `/api/rounds/${roundId}/restart-recording`, hostCookie, { expectedVersion: 2, kind: 'speaker' });
+    assert.equal(restarted.statusCode, 200);
+    storage.files.set(new URL(abandoned.uploadUrl).pathname.slice(1), { bytes: 100, mimeType: 'audio/webm' });
+    assert.equal((await post(a, `/api/rounds/${roundId}/uploads/${abandoned.audioId}/commit`, hostCookie, { expectedVersion: 3 })).json().error, 'STALE_AUDIO');
+    const payload = { kind: 'speaker', mimeType: 'audio/webm', byteSize: 2048, idempotencyKey: crypto.randomUUID() };
+    assert.equal((await post(b, `/api/rounds/${roundId}/uploads`, guestCookie, payload)).statusCode, 403);
+    const requests = await Promise.all([post(a, `/api/rounds/${roundId}/uploads`, hostCookie, payload), post(b, `/api/rounds/${roundId}/uploads`, hostCookie, payload)]);
+    assert.deepEqual(requests.map(r => r.statusCode), [200, 200]);
+    const asset = requests[0].json();
+    assert.equal(asset.audioId, requests[1].json().audioId);
+    const key = new URL(asset.uploadUrl).pathname.slice(1);
+    const commitUrl = `/api/rounds/${roundId}/uploads/${asset.audioId}/commit`;
+    assert.equal((await post(a, commitUrl, hostCookie, { expectedVersion: 3 })).json().error, 'UPLOAD_NOT_VERIFIED');
+    storage.files.set(key, { bytes: 2048, mimeType: 'audio/webm', invalid: true });
+    const rejected = await post(a, commitUrl, hostCookie, { expectedVersion: 3 });
+    assert.equal(rejected.statusCode, 400);
+    assert.equal(rejected.json().error, 'UNSUPPORTED_AUDIO');
+    storage.files.set(key, { bytes: 2048, mimeType: 'audio/webm' });
+    const commits = await Promise.all([post(a, commitUrl, hostCookie, { expectedVersion: 3, transcribe: true }), post(b, commitUrl, hostCookie, { expectedVersion: 3, transcribe: true })]);
+    assert.deepEqual(commits.map(r => r.statusCode), [200, 200]);
+    assert.equal(commits[0].json().audioId, commits[1].json().audioId);
+    assert.equal(commits[0].json().round.stage, 'KEYPOINT_CONFIRM');
+    assert.equal((await b.inject({ method: 'GET', url: `/api/rounds/${roundId}/audio/${asset.audioId}/access`, headers: { cookie: guestCookie } })).statusCode, 403);
+    assert.equal((await b.inject({ method: 'GET', url: `/api/rounds/${roundId}/audio/${asset.audioId}/access` })).statusCode, 401);
+    assert.equal((await pool.query(`SELECT count(*)::int AS n FROM audio_assets WHERE round_id = $1 AND kind = 'speaker' AND state = 'COMMITTED'`, [roundId])).rows[0].n, 1);
+    await post(a, commitUrl, hostCookie, { expectedVersion: 3, transcribe: false });
+    assert.equal((await pool.query('SELECT transcription_requested FROM audio_assets WHERE id = $1', [asset.audioId])).rows[0].transcription_requested, true, 'retry cannot change the first transcription choice');
+    assert.equal((await b.inject({ method: 'GET', url: `/api/rounds/${roundId}/points`, headers: { cookie: guestCookie } })).statusCode, 403, 'auditory mode hides key points from listener');
+    assert.equal((await post(b, `/api/rounds/${roundId}/points/confirm`, guestCookie, { expectedVersion: 4, points: [{ category: '需求', text: '午饭要看外婆身体情况' }] })).statusCode, 403);
+    const confirmed = await post(a, `/api/rounds/${roundId}/points/confirm`, hostCookie, { expectedVersion: 4, points: [{ category: '需求', text: '午饭要看外婆身体情况' }] });
+    assert.equal(confirmed.statusCode, 200);
+    assert.equal(confirmed.json().round.stage, 'LISTENER_RETELL');
+    assert.equal((await a.inject({ method: 'GET', url: `/api/rounds/${roundId}/points`, headers: { cookie: hostCookie } })).json()[0].text, '午饭要看外婆身体情况');
+    assert.equal((await b.inject({ method: 'GET', url: `/api/rounds/${roundId}/audio/${asset.audioId}/access`, headers: { cookie: guestCookie } })).statusCode, 200);
+    const sealed = (await pool.query('SELECT content_ciphertext FROM key_points WHERE round_id = $1', [roundId])).rows[0].content_ciphertext as Buffer;
+    assert.equal(sealed.includes(Buffer.from('午饭要看外婆身体情况')), false);
+    const listenerPending = (await post(b, `/api/rounds/${roundId}/uploads`, guestCookie, { kind: 'listener', mimeType: 'audio/webm', byteSize: 100, idempotencyKey: crypto.randomUUID() })).json();
+    assert.equal((await post(b, `/api/rounds/${roundId}/restart-recording`, guestCookie, { expectedVersion: 5, kind: 'listener' })).statusCode, 200);
+    storage.files.set(new URL(listenerPending.uploadUrl).pathname.slice(1), { bytes: 100, mimeType: 'audio/webm' });
+    assert.equal((await post(b, `/api/rounds/${roundId}/uploads/${listenerPending.audioId}/commit`, guestCookie, { expectedVersion: 6, consentToTranscribe: true })).json().error, 'STALE_AUDIO');
+    const guestUpload = (await post(b, `/api/rounds/${roundId}/uploads`, guestCookie, { kind: 'listener', mimeType: 'audio/webm', byteSize: 1024, idempotencyKey: crypto.randomUUID() })).json();
+    assert.equal((await post(b, `/api/rounds/${roundId}/uploads`, guestCookie, { kind: 'listener', mimeType: 'audio/webm', byteSize: 5, idempotencyKey: crypto.randomUUID() })).json().error, 'INVALID_AUDIO');
+    storage.files.set(new URL(guestUpload.uploadUrl).pathname.slice(1), { bytes: 1024, mimeType: 'audio/webm' });
+    const guestCommitUrl = `/api/rounds/${roundId}/uploads/${guestUpload.audioId}/commit`;
+    assert.equal((await post(b, guestCommitUrl, guestCookie, { expectedVersion: 6 })).json().error, 'CONSENT_REQUIRED');
+    const guestCommit = await post(b, guestCommitUrl, guestCookie, { expectedVersion: 6, consentToTranscribe: true });
+    assert.equal(guestCommit.statusCode, 200);
+    assert.equal(guestCommit.json().round.stage, 'COMPARING');
+    assert.equal((await pool.query('SELECT transcription_requested FROM audio_assets WHERE id = $1', [guestUpload.audioId])).rows[0].transcription_requested, true);
+    assert.ok((await comparisons.pendingRoundIds()).includes(roundId));
+    const input = await comparisons.input(roundId);
+    assert.equal(input?.points[0]?.text, '午饭要看外婆身体情况');
+    assert.equal((await b.inject({ method: 'GET', url: `/api/rounds/${roundId}/comparison`, headers: { cookie: guestCookie } })).statusCode, 409);
+    const comparison = [{ id: input!.points[0]!.id, complete: false, accurate: false, listenerQuote: '一起吃午饭', tag: '理解偏了', clarification: '午饭是否要看外婆身体？' }];
+    assert.equal(await comparisons.complete(roundId, guestUpload.audioId, '一起吃午饭', comparison), true);
+    assert.equal(await comparisons.complete(roundId, guestUpload.audioId, '一起吃午饭', comparison), false, 'worker retry cannot duplicate results');
+    const viewed = await b.inject({ method: 'GET', url: `/api/rounds/${roundId}/comparison`, headers: { cookie: guestCookie } });
+    assert.equal(viewed.statusCode, 200);
+    assert.equal(viewed.json().issues[0].listenerQuote, '一起吃午饭');
+    assert.equal(viewed.json().issues[0].original, '午饭要看外婆身体情况');
+    assert.equal((await b.inject({ method: 'GET', url: `/api/rounds/${roundId}/comparison` })).statusCode, 401);
+    const sealedTranscript = (await pool.query('SELECT ciphertext FROM transcripts WHERE audio_id = $1', [guestUpload.audioId])).rows[0].ciphertext as Buffer;
+    assert.equal(sealedTranscript.includes(Buffer.from('一起吃午饭')), false);
+    assert.equal((await pool.query('SELECT count(*)::int AS n FROM comparison_items WHERE round_id = $1', [roundId])).rows[0].n, 1);
+    const issueId = viewed.json().issues[0].id;
+    const labelBody = { expectedVersion: 8, labels: [{ issueId, tag: '理解偏了', resolution: 'misunderstanding' }] };
+    assert.equal((await post(b, `/api/rounds/${roundId}/review/label`, guestCookie, labelBody)).statusCode, 403);
+    assert.equal((await post(a, `/api/rounds/${roundId}/review/label`, hostCookie, labelBody)).json().stage, 'MUTUAL_CONFIRM');
+    assert.equal((await post(a, `/api/rounds/${roundId}/review/submit`, hostCookie, { expectedVersion: 9 })).json().error, 'UNCONFIRMED_ISSUES');
+    assert.equal((await post(b, `/api/rounds/${roundId}/review/confirm`, guestCookie, { expectedVersion: 9, issueId })).statusCode, 200);
+    assert.equal((await post(a, `/api/rounds/${roundId}/review/revise`, hostCookie, { expectedVersion: 10, issueId, tag: '重点被误解', resolution: 'misunderstanding' })).statusCode, 200);
+    const afterRevision = (await a.inject({ method: 'GET', url: `/api/rounds/${roundId}/comparison`, headers: { cookie: hostCookie } })).json().issues[0];
+    assert.equal(afterRevision.listenerConfirmed, false);
+    assert.equal(afterRevision.tag, '重点被误解');
+    assert.equal((await post(a, `/api/rounds/${roundId}/review/confirm`, hostCookie, { expectedVersion: 11, issueId })).statusCode, 200);
+    assert.equal((await post(a, `/api/rounds/${roundId}/review/submit`, hostCookie, { expectedVersion: 12 })).json().error, 'UNCONFIRMED_ISSUES');
+    assert.equal((await post(b, `/api/rounds/${roundId}/review/confirm`, guestCookie, { expectedVersion: 12, issueId })).statusCode, 200);
+    assert.equal((await post(b, `/api/rounds/${roundId}/review/submit`, guestCookie, { expectedVersion: 13 })).statusCode, 403);
+    assert.equal((await post(a, `/api/rounds/${roundId}/review/submit`, hostCookie, { expectedVersion: 13 })).json().stage, 'ADVICE');
+    assert.equal((await post(a, `/api/rounds/${roundId}/uploads`, hostCookie, { kind: 'listener', mimeType: 'audio/webm', byteSize: 1024, idempotencyKey: crypto.randomUUID() })).statusCode, 403);
+    const nextPath = `/api/rooms/${id}/next-round`;
+    const nextBody = { roundId, expectedVersion: 14 };
+    assert.equal((await post(b, nextPath, guestCookie, nextBody)).statusCode, 403);
+    const archives = await Promise.all([post(a, nextPath, hostCookie, nextBody), post(b, nextPath, hostCookie, nextBody)]);
+    for (const response of archives) {
+      assert.equal(response.statusCode, 200);
+      assert.equal(response.json().stage, 'ARCHIVED');
+      assert.equal(response.json().status, 'WAITING');
+      assert.ok(response.json().members.every((member: { ready: boolean }) => !member.ready));
+    }
+    const archivedReport = await b.inject({ method: 'GET', url: `/api/rounds/${roundId}/comparison`, headers: { cookie: guestCookie } });
+    assert.equal(archivedReport.statusCode, 200);
+    assert.equal(archivedReport.json().issues[0].listenerConfirmed, true);
+    assert.equal((await post(b, `/api/rounds/${roundId}/uploads`, guestCookie, { kind: 'listener', mimeType: 'audio/webm', byteSize: 1024, idempotencyKey: crypto.randomUUID() })).statusCode, 409);
+    const swapped = await post(a, `/api/rooms/${id}/swap-seats`, hostCookie, { expectedVersion: archives[0]!.json().version });
+    assert.equal(swapped.statusCode, 200);
+    assert.equal(swapped.json().you.role, 'listener');
+    assert.equal(swapped.json().members.find((m: { role: string }) => m.role === 'speaker').id, started.members.find((m: { role: string }) => m.role === 'listener').id);
+    assert.equal((await post(b, `/api/rooms/${id}/swap-seats`, guestCookie, { expectedVersion: archives[0]!.json().version })).json().error, 'STALE_VERSION');
+    await post(b, `/api/rooms/${id}/leave`, guestCookie, {});
+    assert.equal((await b.inject({ method: 'GET', url: `/api/rounds/${roundId}/audio/${asset.audioId}/access`, headers: { cookie: guestCookie } })).statusCode, 200);
+    assert.equal((await b.inject({ method: 'GET', url: `/api/rounds/${roundId}/comparison`, headers: { cookie: guestCookie } })).statusCode, 200);
+  } finally { await Promise.all([a.close(), b.close()]); await pool.end(); }
+});

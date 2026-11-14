@@ -1,0 +1,55 @@
+{
+  "name": "echo-training-room",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24 <27"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test:core": "node --experimental-strip-types --test packages/core/test/*.test.ts",
+    "test:api": "node --experimental-strip-types --test apps/api/test/*.test.ts",
+    "test:integration": "node --experimental-strip-types --test apps/api/test/*.integration.ts",
+    "test:browser": "node tests/room.browser.mjs",
+    "test:e2e": "node scripts/test-e2e.mjs",
+    "test": "npm run typecheck && npm run test:core && npm run test:api",
+    "dev:api": "node --experimental-strip-types --watch apps/api/src/main.ts",
+    "dev:worker": "node --experimental-strip-types --watch apps/api/src/worker.ts",
+    "db:migrate": "node --experimental-strip-types apps/api/src/migrate.ts",
+    "dev:web": "vite --config apps/web/vite.config.ts",
+    "build:api": "tsc -p apps/api/tsconfig.build.json && node scripts/copy-migrations.mjs",
+    "start:api": "node dist/apps/api/src/main.js",
+    "start:worker": "node dist/apps/api/src/worker.js",
+    "db:migrate:built": "node dist/apps/api/src/migrate.js",
+    "build:web": "vite build --config apps/web/vite.config.ts"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "3.1168.0",
+    "@aws-sdk/s3-request-presigner": "3.1168.0",
+    "@fastify/helmet": "13.2.0",
+    "@fastify/rate-limit": "11.2.2",
+    "@fastify/static": "10.1.10",
+    "@socket.io/redis-streams-adapter": "0.3.1",
+    "bullmq": "6.7.6",
+    "fastify": "5.12.8",
+    "ioredis": "6.0.0",
+    "jose": "6.2.17",
+    "pg": "8.23.1",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "socket.io": "4.8.4",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.6",
+    "@types/pg": "8.23.1",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@types/socket.io-client": "1.4.36",
+    "@vitejs/plugin-react": "6.3.0",
+    "playwright": "1.65.0",
+    "tsx": "4.23.15",
+    "typescript": "7.0.2",
+    "vite": "8.3.8"
+  }
+}

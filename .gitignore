@@ -1,0 +1,17 @@
+node_modules/
+dist/
+coverage/
+playwright-report/
+test-results/
+.env
+.env.*
+!.env.example
+*.log
+*.pem
+*.key
+secrets/
+.ssh/
+.codex/
+.agents/
+.aws/
+开发上线凭据与资源审计.md
