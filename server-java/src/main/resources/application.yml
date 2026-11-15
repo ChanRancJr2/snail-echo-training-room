@@ -1,0 +1,24 @@
+server:
+  address: 127.0.0.1
+  port: ${JAVA_API_PORT:3001}
+  error:
+    include-message: never
+    include-stacktrace: never
+spring:
+  datasource:
+    url: ${JAVA_DB_URL}
+    username: ${JAVA_DB_USER}
+    password: ${JAVA_DB_PASSWORD}
+  jackson:
+    deserialization:
+      fail-on-unknown-properties: true
+      accept-float-as-int: false
+  mvc:
+    problemdetails:
+      enabled: false
+mybatis:
+  configuration:
+    map-underscore-to-camel-case: true
+    local-cache-scope: STATEMENT
+echo:
+  origin: ${JAVA_PUBLIC_ORIGIN:http://localhost:3100}

@@ -1,0 +1,136 @@
+package io.snailecho;
+
+import java.time.Duration;
+import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
+
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Pattern;
+import jakarta.validation.constraints.Size;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.CacheControl;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.ResponseCookie;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+
+import static io.snailecho.ApiFailure.invalid;
+
+@RestController
+class RoomController {
+    private static final String SESSION = "echo_session";
+    private final RoomService rooms;
+    private final SessionService sessions;
+    private final String origin;
+
+    RoomController(RoomService rooms, SessionService sessions, @Value("${echo.origin}") String origin) {
+        this.rooms = rooms;
+        this.sessions = sessions;
+        this.origin = origin;
+    }
+
+    record SessionRequest(@Size(max = 20) String nickname) {}
+    record CreateRequest(@NotNull @Pattern(regexp = "sync") String mode,
+                         @NotNull @Size(min = 8, max = 100) String createKey,
+                         Integer durationSeconds, @Pattern(regexp = "auditory|keywords") String retellStyle,
+                         @Size(max = 80) String topic) {}
+    record InviteRequest(@NotNull @Pattern(regexp = "listener|observer") String role,
+                         @NotNull @Min(5) @Max(10080) Integer minutes,
+                         @NotNull @Min(1) @Max(10) Integer maxUses,
+                         @Size(min = 6, max = 100) String password) {}
+    record JoinRequest(@NotNull String token, @Size(max = 100) String password) {}
+    record ReadyRequest(@NotNull Boolean ready) {}
+
+    @GetMapping("/health/live")
+    Map<String, String> live() {
+        return Map.of("status", "ok");
+    }
+
+    @PostMapping("/api/sessions/anonymous")
+    ResponseEntity<SessionService.Session> session(@RequestHeader(value = "Origin", required = false) String from,
+                                                   @Valid @RequestBody SessionRequest request) {
+        checkOrigin(from);
+        var issued = sessions.create(request.nickname());
+        var cookie = ResponseCookie.from(SESSION, issued.token()).httpOnly(true).sameSite("Lax").path("/")
+                .secure(origin.startsWith("https://")).maxAge(Duration.ofHours(12)).build();
+        return ResponseEntity.ok().cacheControl(CacheControl.noStore())
+                .header(HttpHeaders.SET_COOKIE, cookie.toString()).body(issued.session());
+    }
+
+    @GetMapping("/api/me")
+    ResponseEntity<SessionService.Session> me(@CookieValue(value = SESSION, required = false) String cookie) {
+        return ResponseEntity.ok().cacheControl(CacheControl.noStore()).body(sessions.require(cookie));
+    }
+
+    @PostMapping("/api/rooms")
+    ResponseEntity<RoomService.CreateResult> create(@RequestHeader(value = "Origin", required = false) String from,
+                                                    @CookieValue(value = SESSION, required = false) String cookie,
+                                                    @Valid @RequestBody CreateRequest request) {
+        String actor = actor(from, cookie);
+        int seconds = request.durationSeconds() == null ? 30 : request.durationSeconds();
+        if (!Set.of(30, 60, 120, 300).contains(seconds)) throw invalid();
+        String style = request.retellStyle() == null ? "auditory" : request.retellStyle();
+        String topic = request.topic() == null ? "家庭日常" : request.topic().strip();
+        if (topic.isEmpty()) throw invalid();
+        var data = rooms.create(actor, request.createKey(), seconds, style, topic);
+        return ResponseEntity.status(data.inviteToken() == null ? 200 : 201).body(data);
+    }
+
+    @GetMapping("/api/rooms/{roomId}")
+    ResponseEntity<RoomService.State> snapshot(@PathVariable UUID roomId,
+                                              @CookieValue(value = SESSION, required = false) String cookie) {
+        return ResponseEntity.ok().cacheControl(CacheControl.noStore())
+                .body(rooms.snapshot(roomId.toString(), sessions.require(cookie).id()));
+    }
+
+    @PostMapping("/api/rooms/{roomId}/invitations")
+    ResponseEntity<RoomService.PublicInvite> invite(@PathVariable UUID roomId,
+                                                   @RequestHeader(value = "Origin", required = false) String from,
+                                                   @CookieValue(value = SESSION, required = false) String cookie,
+                                                   @Valid @RequestBody InviteRequest request) {
+        return ResponseEntity.status(201).body(rooms.invite(roomId.toString(), actor(from, cookie),
+                request.role(), request.minutes(), request.maxUses(), request.password()));
+    }
+
+    @PostMapping("/api/rooms/join")
+    RoomService.State join(@RequestHeader(value = "Origin", required = false) String from,
+                           @CookieValue(value = SESSION, required = false) String cookie,
+                           @Valid @RequestBody JoinRequest request) {
+        return rooms.join(actor(from, cookie), request.token(), request.password());
+    }
+
+    @PostMapping("/api/rooms/{roomId}/ready")
+    RoomService.State ready(@PathVariable UUID roomId,
+                            @RequestHeader(value = "Origin", required = false) String from,
+                            @CookieValue(value = SESSION, required = false) String cookie,
+                            @Valid @RequestBody ReadyRequest request) {
+        return rooms.ready(roomId.toString(), actor(from, cookie), request.ready());
+    }
+
+    @PostMapping("/api/rooms/{roomId}/start")
+    RoomService.State start(@PathVariable UUID roomId,
+                            @RequestHeader(value = "Origin", required = false) String from,
+                            @CookieValue(value = SESSION, required = false) String cookie) {
+        return rooms.start(roomId.toString(), actor(from, cookie));
+    }
+
+    @PostMapping("/api/rooms/{roomId}/leave")
+    Map<String, String> leave(@PathVariable UUID roomId,
+                              @RequestHeader(value = "Origin", required = false) String from,
+                              @CookieValue(value = SESSION, required = false) String cookie) {
+        return Map.of("status", rooms.leave(roomId.toString(), actor(from, cookie)));
+    }
+
+    private String actor(String from, String cookie) {
+        checkOrigin(from);
+        return sessions.require(cookie).id();
+    }
+
+    private void checkOrigin(String from) {
+        if (!origin.equals(from)) throw new ApiFailure(403, "ORIGIN_DENIED");
+    }
+}

@@ -44,6 +44,8 @@ Windows 默认使用本机 Microsoft Edge。使用其他 Chromium 浏览器时�
 
 ## 项目目录
 
+Java 版双人练开局切片可独立启动，见 [Java API 本地开发](server-java/README.md)。
+
 - `product/apps/web` 是 React H5 前端。
 - `product/apps/api` 包含 Fastify API、数据库迁移、对象存储和转写 Worker。
 - `product/packages/core` 是共享的状态机和录音格式校验。
