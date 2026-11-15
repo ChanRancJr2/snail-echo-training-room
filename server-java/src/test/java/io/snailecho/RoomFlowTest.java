@@ -33,7 +33,9 @@ import java.time.Instant;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -62,6 +64,9 @@ class RoomFlowTest {
     @Autowired TranscriptionMapper transcriptionJobs;
     @Autowired S3AudioStorage objectStorage;
     @Autowired AsrArtifactCleanup cleanup;
+    @Autowired ComparisonMapper comparisonMapper;
+    @Autowired ComparisonService comparisonService;
+    @Autowired ComparisonWorker comparisonWorker;
 
     @BeforeAll static void dependencies() { Startables.deepStart(DATABASE, STORAGE).join(); }
 
@@ -78,6 +83,7 @@ class RoomFlowTest {
         registry.add("echo.processing.mode", () -> "mock");
         registry.add("echo.processing.master-key", () -> java.util.Base64.getEncoder().encodeToString(new byte[32]));
         registry.add("echo.processing.worker-delay-ms", () -> 3600000);
+        registry.add("echo.processing.comparison-delay-ms", () -> 3600000);
     }
 
     @Test void onlyOneRoundStartsAfterBothParticipantsAreReady() throws Exception {
@@ -409,8 +415,8 @@ class RoomFlowTest {
             worker.runOne();
             return "DONE".equals(database.queryForObject("SELECT status FROM transcription_jobs WHERE audio_id = ?", String.class, listenerId));
         });
-        org.awaitility.Awaitility.await().atMost(Duration.ofSeconds(8)).untilAsserted(() ->
-                assertThat(get(path + "/comparison", fixture.speaker()).statusCode()).isEqualTo(200));
+        comparisonWorker.sweep();
+        assertThat(get(path + "/comparison", fixture.speaker()).statusCode()).isEqualTo(200);
         var comparison = body(get(path + "/comparison", fixture.speaker()));
         assertThat(comparison.at("/total").asInt()).isEqualTo(1);
         assertThat(comparison.at("/complete").asInt()).isZero();
@@ -473,6 +479,7 @@ class RoomFlowTest {
                 fixture.roundId());
         assertThat(queue.startProvider(late)).isFalse();
         assertThat(queue.complete(late, "到期后返回的复述转写")).isFalse();
+        comparisonWorker.sweep();
         org.awaitility.Awaitility.await().atMost(Duration.ofSeconds(8)).untilAsserted(() -> {
             var snapshot = body(get(fixture.room(), fixture.speaker()));
             assertThat(snapshot.get("status").asText()).isEqualTo("WAITING");
@@ -484,6 +491,180 @@ class RoomFlowTest {
                 Integer.class, fixture.roundId())).isZero();
         assertThat(database.queryForObject("SELECT COUNT(*) FROM transcription_jobs WHERE round_id = ? AND status = 'CANCELLED'",
                 Integer.class, fixture.roundId())).isEqualTo(2);
+    }
+
+    @Test void comparisonLeaseFencesLateWorkersAndWritesIndependentTotals() throws Exception {
+        var fixture = readyForSemanticComparison();
+        var candidate = comparisonMapper.due(ComparisonService.PROVIDER_BUDGET_SECONDS).stream().filter(round -> round.id().equals(fixture.roundId()))
+                .findFirst().orElseThrow();
+        var stale = comparisonService.prepare(candidate, true, true);
+        assertThat(stale).isNotNull();
+        assertThat(comparisonService.prepare(candidate, true, true)).isNull();
+        database.update("UPDATE rounds SET comparison_available_at = TIMESTAMPADD(SECOND, -1, CURRENT_TIMESTAMP(6)) WHERE id = ?",
+                fixture.roundId());
+        var current = comparisonService.prepare(candidate, true, true);
+        assertThat(current).isNotNull();
+        assertThat(current.token()).isNotEqualTo(stale.token());
+        String id = current.points().getFirst().id();
+        var judgment = Map.of(id, new ArkComparison.Judgment(false, true, "周六和家人见面", "理解不到位", null));
+        comparisonService.finish(stale, judgment);
+        assertThat(get(fixture.path() + "/comparison", fixture.speaker()).statusCode()).isEqualTo(409);
+        comparisonService.finish(current, judgment);
+        var saved = body(get(fixture.path() + "/comparison", fixture.speaker()));
+        assertThat(saved.get("provider").asText()).isEqualTo("ark_partial");
+        assertThat(saved.get("total").asInt()).isEqualTo(2);
+        assertThat(saved.get("complete").asInt()).isZero();
+        assertThat(saved.get("accurate").asInt()).isEqualTo(1);
+        assertThat(saved.at("/issues/0/listenerQuote").asText()).isEqualTo("周六和家人见面");
+    }
+
+    @Test void twoTransientArkFailuresFallBackAndLeaveReviewAvailable() throws Exception {
+        var fixture = readyForSemanticComparison();
+        var calls = new AtomicInteger();
+        var server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/compare", exchange -> {
+            calls.incrementAndGet();
+            replyAsr(exchange, 503, "unavailable", "{}");
+        });
+        server.start();
+        try {
+            var ark = new ArkComparison(HTTP, JSON, URI.create("http://127.0.0.1:"
+                    + server.getAddress().getPort() + "/compare"), "test-only", "fake-ep", Duration.ofSeconds(2));
+            var semantic = new ComparisonWorker(comparisonMapper, comparisonService, Optional.of(ark), Runnable::run);
+            semantic.sweep();
+            assertThat(calls).hasValue(1);
+            assertThat(get(fixture.path() + "/comparison", fixture.speaker()).statusCode()).isEqualTo(409);
+            database.update("UPDATE rounds SET comparison_available_at = TIMESTAMPADD(SECOND, -1, CURRENT_TIMESTAMP(6)) WHERE id = ?",
+                    fixture.roundId());
+            semantic.sweep();
+            semantic.sweep();
+            assertThat(calls).hasValue(2);
+            var saved = body(get(fixture.path() + "/comparison", fixture.speaker()));
+            assertThat(saved.get("provider").asText()).isEqualTo("rules_fallback");
+            assertThat(saved.at("/issues/0/listenerQuote").asText()).contains("周六和家人见面");
+            var snapshot = body(get(fixture.room(), fixture.speaker()));
+            assertThat(snapshot.get("stage").asText()).isEqualTo("SPEAKER_LABELING");
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test void elapsedComparisonFallsBackEvenIfItsProviderLeaseStillExists() throws Exception {
+        var fixture = readyForSemanticComparison();
+        var candidate = comparisonMapper.due(ComparisonService.PROVIDER_BUDGET_SECONDS).stream()
+                .filter(round -> round.id().equals(fixture.roundId())).findFirst().orElseThrow();
+        var inFlight = comparisonService.prepare(candidate, true, true);
+        assertThat(inFlight).isNotNull();
+        database.update("UPDATE rounds SET deadline_at = TIMESTAMPADD(SECOND, -1, CURRENT_TIMESTAMP(6)) WHERE id = ?",
+                fixture.roundId());
+        assertThat(comparisonMapper.due(ComparisonService.PROVIDER_BUDGET_SECONDS)).contains(candidate);
+        assertThat(comparisonService.prepare(candidate, true, false)).isNull();
+        String id = inFlight.points().getFirst().id();
+        comparisonService.finish(inFlight, Map.of(id,
+                new ArkComparison.Judgment(true, true, "周六和家人见面", null, null)));
+        var saved = body(get(fixture.path() + "/comparison", fixture.speaker()));
+        assertThat(saved.get("provider").asText()).isEqualTo("rules_fallback");
+        assertThat(saved.get("complete").asInt()).isZero();
+    }
+
+    @Test void healthyProviderPublishesAllGroundedPointsAndFullTranscripts() throws Exception {
+        var fixture = readyForSemanticComparison();
+        var server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/compare", exchange -> {
+            var request = JSON.readTree(exchange.getRequestBody());
+            var data = JSON.readTree(request.at("/messages/1/content").asText());
+            var items = JSON.createArrayNode();
+            for (var point : data.path("points")) {
+                String quote = "时间".equals(point.path("category").asText()) ? "下午四点就回家" : "周六和家人见面，再讨论聚餐安排";
+                items.addObject().put("id", point.path("id").asText()).put("complete", true).put("accurate", true)
+                        .put("listenerQuote", quote).putNull("tag").putNull("clarification");
+            }
+            String content = JSON.writeValueAsString(Map.of("items", items));
+            replyAsr(exchange, 200, "ok", JSON.writeValueAsString(Map.of("choices", java.util.List.of(
+                    Map.of("finish_reason", "stop", "message", Map.of("content", content))))));
+        });
+        server.start();
+        try {
+            var ark = new ArkComparison(HTTP, JSON, URI.create("http://127.0.0.1:"
+                    + server.getAddress().getPort() + "/compare"), "test-only", "fake-ep", Duration.ofSeconds(2));
+            new ComparisonWorker(comparisonMapper, comparisonService, Optional.of(ark), Runnable::run).sweep();
+            var saved = body(get(fixture.path() + "/comparison", fixture.speaker()));
+            assertThat(saved.get("provider").asText()).isEqualTo("ark");
+            assertThat(saved.get("total").asInt()).isEqualTo(2);
+            assertThat(saved.get("complete").asInt()).isEqualTo(2);
+            assertThat(saved.get("accurate").asInt()).isEqualTo(2);
+            assertThat(saved.at("/transcripts/speaker").asText()).contains("周六先看望家人");
+            assertThat(saved.at("/transcripts/listener").asText()).contains("周六和家人见面");
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test void closingRoomDuringProviderCallDoesNotBlockOrPersistTheResponse() throws Exception {
+        var fixture = readyForSemanticComparison();
+        var reachedProvider = new CountDownLatch(1);
+        var releaseResponse = new CountDownLatch(1);
+        var server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/compare", exchange -> {
+            reachedProvider.countDown();
+            try {
+                if (!releaseResponse.await(8, TimeUnit.SECONDS)) return;
+                replyAsr(exchange, 200, "ok", JSON.writeValueAsString(Map.of("choices", java.util.List.of(
+                        Map.of("finish_reason", "stop", "message", Map.of("content", "{\"items\":[]}"))))));
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+            } finally {
+                exchange.close();
+            }
+        });
+        server.start();
+        try (var clients = Executors.newVirtualThreadPerTaskExecutor()) {
+            var ark = new ArkComparison(HTTP, JSON, URI.create("http://127.0.0.1:"
+                    + server.getAddress().getPort() + "/compare"), "test-only", "fake-ep", Duration.ofSeconds(10));
+            var semantic = new ComparisonWorker(comparisonMapper, comparisonService, Optional.of(ark), clients);
+            var pending = clients.submit(semantic::sweep);
+            try {
+                assertThat(reachedProvider.await(5, TimeUnit.SECONDS)).isTrue();
+                var local = readyForSemanticComparison();
+                database.update("""
+                    UPDATE transcription_jobs j JOIN rounds r ON r.listener_audio_id=j.audio_id
+                    SET j.provider = 'mock' WHERE r.id = ?
+                    """, local.roundId());
+                clients.submit(semantic::sweep).get(3, TimeUnit.SECONDS);
+                assertThat(get(local.path() + "/comparison", local.speaker()).statusCode()).isEqualTo(200);
+                var closing = clients.submit(() -> post(fixture.room() + "/leave", Map.of(), fixture.speaker()));
+                assertThat(closing.get(3, TimeUnit.SECONDS).statusCode()).isEqualTo(200);
+            } finally {
+                releaseResponse.countDown();
+            }
+            pending.get(5, TimeUnit.SECONDS);
+        } finally {
+            server.stop(0);
+        }
+        assertThat(database.queryForObject("SELECT COUNT(*) FROM round_comparisons WHERE round_id = ?",
+                Integer.class, fixture.roundId())).isZero();
+    }
+
+    private RecordingFixture readyForSemanticComparison() throws Exception {
+        var fixture = recordingRoom();
+        var speaker = uploadForProcessing(fixture, "speaker", fixture.speaker(), fixture.version(), true);
+        awaitTranscript(fixture.path() + "/speaker-transcript", fixture.speaker());
+        long version = speaker.at("/round/version").asLong();
+        var points = java.util.List.of(Map.of("category", "需求", "text", "周六先看望家人，再决定是否聚餐"),
+                Map.of("category", "时间", "text", "下午四点回家"));
+        assertThat(post(fixture.path() + "/points/confirm", Map.of("expectedVersion", version, "points", points),
+                fixture.speaker()).statusCode()).isEqualTo(200);
+        var recording = body(post(fixture.path() + "/restart-recording",
+                Map.of("expectedVersion", version + 1, "kind", "listener"), fixture.listener()));
+        String listener = uploadForProcessing(fixture, "listener", fixture.listener(), recording.get("version").asLong(), true)
+                .get("audioId").asText();
+        makeJobDue(listener);
+        var lease = queue.claim("mock");
+        assertThat(lease.audioId()).isEqualTo(listener);
+        assertThat(queue.complete(lease, "周六和家人见面，再讨论聚餐安排。下午四点就回家。")).isTrue();
+        assertThat(transcriptionJobs.byId(listener).status()).isEqualTo("DONE");
+        database.update("UPDATE transcription_jobs SET provider = 'volc' WHERE audio_id = ?", listener);
+        return fixture;
     }
 
     @Test void reclaimedJobDiscardsExpiredWorkerResultAndClosedRoomResult() throws Exception {

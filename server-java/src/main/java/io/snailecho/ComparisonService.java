@@ -2,7 +2,9 @@ package io.snailecho;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 import java.util.function.UnaryOperator;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -21,6 +23,8 @@ class ComparisonService {
     private static final Set<String> REVIEW_STAGES = Set.of("SPEAKER_LABELING", "MUTUAL_CONFIRM");
     private static final Pattern SENTENCE = Pattern.compile("[^。！？!?\\r\\n]+[。！？!?]?");
     private static final Pattern PUNCTUATION = Pattern.compile("[\\p{P}\\s]+", Pattern.UNICODE_CHARACTER_CLASS);
+    private static final int MAX_PROVIDER_ATTEMPTS = 2;
+    static final int PROVIDER_BUDGET_SECONDS = ArkComparison.REQUEST_SECONDS + 2;
 
     record Item(String id, String category, String original, String speakerQuote, String listenerQuote,
                 boolean complete, boolean accurate, String clarification, Feedback feedback) {
@@ -67,6 +71,8 @@ class ComparisonService {
                 Transcripts transcripts, Report report, String provider) {}
     record Practice(long complete, int total) {}
     record Updated(String id, String stage, long version) {}
+    record LeasedComparison(ComparisonMapper.Candidate candidate, String token, List<ArkComparison.Point> points,
+                            String listener, List<Item> baseline) {}
     private record Access(RoomMapper.Room room, RoomMapper.Round round, String role) {}
 
     private final RoomMapper rooms;
@@ -88,17 +94,23 @@ class ComparisonService {
         this.json = json;
     }
 
-    public void build(ComparisonMapper.Candidate candidate) {
+    public LeasedComparison prepare(ComparisonMapper.Candidate candidate, boolean useArk, boolean providerSlot) {
         var round = lockCandidate(candidate);
-        if (round == null) return;
+        if (round == null) return null;
+        var progress = comparisons.progress(round.id(), PROVIDER_BUDGET_SECONDS);
+        if (!progress.available() && !progress.expired()) return null;
         // The candidate query makes pending jobs eligible only when the database deadline expires.
         var listenerJob = round.listenerAudioId() == null ? null : transcripts.byId(round.listenerAudioId());
         String listener = transcript(listenerJob);
         var confirmed = points.list(round.id());
         if (listener == null || confirmed.isEmpty()) {
             cancelComparison(candidate.roomId(), round);
-            return;
+            return null;
         }
+        boolean mock = !"volc".equals(listenerJob.provider());
+        boolean semantic = !mock && useArk && !listener.isBlank();
+        boolean canCall = semantic && progress.timeForProvider() && progress.attempts() < MAX_PROVIDER_ATTEMPTS;
+        if (canCall && !providerSlot) return null;
         var speakerSentences = sentences(transcript(round.speakerAudioId()));
         var listenerSentences = sentences(listener);
         var items = confirmed.stream().map(point -> {
@@ -113,7 +125,56 @@ class ComparisonService {
                     listenerQuote != null && !match ? "这句是否保留了表达者确认的要点？" : null,
                     new Feedback(tag, null, false, false, null, null, null));
         }).toList();
-        String provider = "volc".equals(listenerJob.provider()) ? "rules" : "mock";
+        if (!semantic) {
+            storeComparison(candidate, round, items, mock ? "mock" : "rules");
+            return null;
+        }
+        if (!canCall) {
+            storeComparison(candidate, round, items, "rules_fallback");
+            return null;
+        }
+        String token = UUID.randomUUID().toString();
+        if (comparisons.claim(round.id(), round.version(), token) != 1) return null;
+        var input = items.stream().map(item -> new ArkComparison.Point(item.id(), item.category(), item.original())).toList();
+        return new LeasedComparison(candidate, token, input, listener, items);
+    }
+
+    public void finish(LeasedComparison work, Map<String, ArkComparison.Judgment> judgments) {
+        var round = lockOwned(work);
+        if (round == null) return;
+        if (judgments.isEmpty() || comparisons.deadlinePassed(round.id())) {
+            storeComparison(work.candidate(), round, work.baseline(), "rules_fallback");
+            return;
+        }
+        var items = work.baseline().stream().map(item -> {
+            var judgment = judgments.get(item.id());
+            if (judgment == null) return item;
+            return new Item(item.id(), item.category(), item.original(), item.speakerQuote(), judgment.listenerQuote(),
+                    judgment.complete(), judgment.accurate(), judgment.clarification(),
+                    new Feedback(judgment.tag(), null, false, false, null, null, null));
+        }).toList();
+        String provider = judgments.size() == items.size() ? "ark" : "ark_partial";
+        storeComparison(work.candidate(), round, items, provider);
+    }
+
+    public void providerFailed(LeasedComparison work, boolean retryable) {
+        var round = lockOwned(work);
+        if (round == null) return;
+        var progress = comparisons.progress(round.id(), PROVIDER_BUDGET_SECONDS + 2);
+        if (retryable && progress.attempts() < MAX_PROVIDER_ATTEMPTS && progress.timeForProvider()) {
+            comparisons.retry(round.id(), work.token());
+        } else {
+            storeComparison(work.candidate(), round, work.baseline(), "rules_fallback");
+        }
+    }
+
+    private RoomMapper.Round lockOwned(LeasedComparison work) {
+        var round = lockCandidate(work.candidate());
+        return round != null && comparisons.owns(round.id(), work.token()) ? round : null;
+    }
+
+    private void storeComparison(ComparisonMapper.Candidate candidate, RoomMapper.Round round, List<Item> items,
+                                 String provider) {
         comparisons.insert(round.id(), seal(round.id(), new Review(items, false, provider)));
         advance(round, "SPEAKER_LABELING");
         rooms.advanceVersion(candidate.roomId());
@@ -121,7 +182,7 @@ class ComparisonService {
 
     public void expireFailed(ComparisonMapper.Candidate candidate) {
         var round = lockCandidate(candidate);
-        if (round != null && comparisons.deadlinePassed(round.id())) {
+        if (round != null && comparisons.progress(round.id(), 0).available() && comparisons.deadlinePassed(round.id())) {
             cancelComparison(candidate.roomId(), round);
         }
     }
@@ -340,7 +401,7 @@ class ComparisonService {
         return PUNCTUATION.matcher(text).replaceAll("");
     }
 
-    // The local mock uses exact wording for acceptance and shared bigrams only to find a possible original quote.
+    // The local comparison uses exact wording for acceptance and shared bigrams to find a possible original quote.
     private static String matchingSentence(String phrase, List<String> sentences) {
         if (phrase.isEmpty()) return null;
         String best = null;

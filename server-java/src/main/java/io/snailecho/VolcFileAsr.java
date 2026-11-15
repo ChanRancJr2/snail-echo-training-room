@@ -1,15 +1,12 @@
 package io.snailecho;
 
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.Map;
 import java.util.concurrent.ExecutionException;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.regex.Pattern;
 
@@ -106,28 +103,18 @@ final class VolcFileAsr {
                 .header("X-Api-Request-Id", taskId).header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(body));
         if (submit) request.header("X-Api-Sequence", "-1");
-        var bytes = new ByteArrayOutputStream();
-        var response = http.sendAsync(request.build(), info -> HttpResponse.BodySubscribers.ofByteArrayConsumer(chunk ->
-                chunk.ifPresent(value -> {
-                    if (value.length > MAX_RESPONSE_BYTES - bytes.size()) {
-                        throw new AsrFailure("VOLC_RESPONSE_TOO_LARGE", false);
-                    }
-                    bytes.writeBytes(value);
-                })));
         try {
-            var result = response.get(timeout.toMillis(), TimeUnit.MILLISECONDS);
-            return new Reply(result.statusCode(), result.headers().firstValue("X-Api-Status-Code").orElse(""),
-                    bytes.toByteArray());
+            var response = ProviderHttp.send(http, request.build(), timeout, MAX_RESPONSE_BYTES);
+            return new Reply(response.status(), response.headers().firstValue("X-Api-Status-Code").orElse(""),
+                    response.body());
         } catch (InterruptedException interrupted) {
-            response.cancel(true);
             Thread.currentThread().interrupt();
             throw new AsrFailure("VOLC_INTERRUPTED", true);
         } catch (TimeoutException timeoutFailure) {
-            response.cancel(true);
             throw new AsrFailure("VOLC_TIMEOUT", true);
         } catch (ExecutionException networkFailure) {
-            if (networkFailure.getCause() instanceof AsrFailure failure) {
-                throw new AsrFailure(failure.getMessage(), submit);
+            if (networkFailure.getCause() instanceof ProviderHttp.ResponseTooLarge) {
+                throw new AsrFailure("VOLC_RESPONSE_TOO_LARGE", submit);
             }
             throw new AsrFailure("VOLC_UNAVAILABLE", true);
         }

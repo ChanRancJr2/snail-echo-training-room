@@ -5,7 +5,7 @@ import { nextPractice } from './flow.ts';
 
 type Resolution = 'misunderstanding' | 'expression' | 'ai_error';
 type Item = { id: string; category: string; original: string; speakerQuote: string | null; listenerQuote: string; complete: boolean; accurate: boolean; tag: string | null; clarification: string | null; resolution: Resolution | null; speakerConfirmed: boolean; listenerConfirmed: boolean; listenerNote: string | null; observerTag: string | null; observerNote: string | null };
-type Result = { total: number; complete: number; accurate: number; issues: Item[]; adviceAccepted: boolean; provider?: 'mock' | 'rules'; transcripts?: { speaker: string; listener: string }; report?: { topic: string; focus: string; speaker: string; listener: string; speakerAudioId: string | null; listenerAudioId: string | null; hintLevel: number } };
+type Result = { total: number; complete: number; accurate: number; issues: Item[]; adviceAccepted: boolean; provider?: 'mock' | 'rules' | 'ark' | 'ark_partial' | 'rules_fallback'; transcripts?: { speaker: string; listener: string }; report?: { topic: string; focus: string; speaker: string; listener: string; speakerAudioId: string | null; listenerAudioId: string | null; hintLevel: number } };
 const sentences = (text: string) => text.match(/[^。！？!?\n]+[。！？!?]?/g)?.map(value => value.trim()).filter(Boolean) ?? [];
 const tags = ['遗漏重要信息', '理解不到位', '理解偏了', '杜撰信息', '强加信息', '我表达不清', '我言不达意', '语气被误解', '重点被误解', 'AI 误判'];
 const resolutions: [Resolution, string][] = [['misunderstanding', '真误解'], ['expression', '表达问题'], ['ai_error', 'AI 误判']];
@@ -68,7 +68,9 @@ export function ComparisonView({ roundId, stage, version, role, solo, labeling =
   return <section className="comparison-view"><p>{isReport ? '本轮报告已归档。' : '双方逐条确认最终结论。'}</p>
     {result.provider === 'mock' && <p className="notice">演示对照使用预置转写和文字匹配。</p>}
     {result.provider === 'rules' && <p className="notice">对照结果基于转写和字面匹配。</p>}
-    {!result.provider && !isReport && <p>AI 提供辅助提示。</p>}
+    {result.provider === 'rules_fallback' && <p className="notice">语义对照暂不可用，以下是字面匹配结果，请双方核对。</p>}
+    {result.provider === 'ark_partial' && <p className="notice">部分要点使用字面匹配，请双方核对。</p>}
+    {(!result.provider || result.provider === 'ark') && !isReport && <p>AI 提供辅助提示。</p>}
     {error && <p role="alert" className="error-text">{error}</p>}
     {report && seats && <>
       <label className="toggle-row"><input type="checkbox" checked={anonymous} onChange={event => setAnonymous(event.target.checked)} /> 匿名显示座位代号</label>

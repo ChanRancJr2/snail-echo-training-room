@@ -46,3 +46,6 @@ echo:
     speech-api-key: ${SPEECH_API_KEY:}
     speech-resource-id: ${SPEECH_RESOURCE_ID:}
     ffmpeg-path: ${JAVA_FFMPEG_PATH:ffmpeg}
+    comparison-mode: ${JAVA_COMPARISON_MODE:rules}
+    ark-api-key: ${ARK_API_KEY:}
+    ark-model-id: ${ARK_MODEL_ID:}

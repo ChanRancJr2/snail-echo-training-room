@@ -1,6 +1,6 @@
 # Java API 本地开发
 
-Java 版支持双人同步练，涵盖匿名会话、邀请、录音直传、Mock 或火山录音转写、文字匹配对照、双方逐条确认、观察者建议、归档和报告导出。表达者归档后，双方重新准备即可在同一房间开始新一轮，也可以先交换角色。语义对照及其他练法仍由 Node.js 版提供。
+Java 版支持双人同步练，涵盖匿名会话、邀请、录音直传、Mock 或火山录音转写、方舟语义对照、双方逐条确认、观察者建议、归档和报告导出。表达者归档后，双方重新准备即可在同一房间开始新一轮，也可以先交换角色。其他练法仍由 Node.js 版提供。
 
 ## 启动与验证
 
@@ -72,8 +72,16 @@ $env:JAVA_TEXT_MASTER_KEY = [Convert]::ToBase64String([Security.Cryptography.Ran
 
 开发测试和火山联调使用不同数据库与桶。入队时固定使用的供应商。若在同一环境切换运行模式，先排空原模式的任务。Worker 将已确认录音转成单声道 MP3，再按房间时间上限截断。首次提交记录意图，后续轮询复用返回的任务 ID。提交结果不明确时尝试查询原请求 UUID，查不到可用结果则结束任务，避免再次发送录音。火山排队超过本应用 3 分钟预算时，本轮按转写失败处理。
 
-完成、失败或取消的任务会定期删除 `asr/` 下的临时转码副本。原始录音由训练室的独立数据保留流程管理。部署时为 `asr/` 配置对象生命周期清理，并为 JVM 的 `java.io.tmpdir` 使用受限的临时卷，覆盖进程崩溃等异常。Java 的逐条对照仍用字面匹配。
+完成、失败或取消的任务会定期删除 `asr/` 下的临时转码副本。原始录音由训练室的独立数据保留流程管理。部署时为 `asr/` 配置对象生命周期清理，并为 JVM 的 `java.io.tmpdir` 使用受限的临时卷，覆盖进程崩溃等异常。
 
 要运行真实 FFmpeg 和本地模拟火山的验收测试，设置 `ECHO_TEST_FFMPEG` 为本机 FFmpeg 绝对路径，再运行 Maven `verify`。测试不会调用真实火山。火山联调用单独测试房间和合成短音频，先验证 HTTPS 签名可抓取，再核对任务返回文字。
 
 [火山任务提交](https://docs.volcengine.com/docs/doubao-voice/task-submission-http-1?lang=zh) · [查询结果](https://docs.volcengine.com/docs/doubao-voice/result-query-http-1?lang=zh) · [状态码](https://docs.volcengine.com/docs/doubao-voice/error-code-query?lang=zh)
+
+## 方舟语义对照
+
+在火山转写环境中设定 `JAVA_COMPARISON_MODE=ark`，通过运行环境注入 `ARK_API_KEY` 和 `ARK_MODEL_ID`。接入点需支持 Chat Completions JSON 输出及关闭思考模式。默认模式是 `rules`。Mock 转写不调用方舟。调用只发送表达者确认的要点和复述者的转写，不发送原始音频、签名链接及会话资料。
+
+对照任务用数据库租约保护，网络调用位于事务外。每实例最多同时调用 4 次，每次最多等待 12 秒，可重试错误最多再试一次，且须留足轮次时间。本地回退在独立调度中处理。结果通过字段、标记和引文校验后落库。缺失或无有效引文的要点回退到字面匹配，整次调用失败时全轮使用字面匹配。界面标明回退结果，双方可以继续逐条确认。
+
+[方舟 Chat Completions API](https://docs.volcengine.com/docs/ark/chat-api?lang=zh) · [方舟结构化输出](https://docs.volcengine.com/docs/ark/structured-output-beta?lang=zh)
