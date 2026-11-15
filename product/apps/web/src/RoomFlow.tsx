@@ -8,7 +8,7 @@ import { KeywordHints } from './KeywordHints.tsx';
 import { modes, nextPractice, roundStep } from './flow.ts';
 import { isSameDevice, type Mode, type Stage } from '../../../packages/core/src/round.ts';
 
-type Room = { id: string; version: number; mode: Mode; status: string; durationSeconds: number; retellStyle: string; topic: string; roundId: string | null; stage: Stage | null; terminalReason?: string | null; roundVersion: number | null; activeSeat: 'speaker' | 'listener' | null; deadlineAt: string | null; speakerAudioId: string | null; listenerAudioId: string | null; previousPractice: { complete: number; total: number } | null; teen: { nickname: string; role: 'speaker' | 'listener'; locked: boolean; completed: boolean } | null; you: { role: 'speaker' | 'listener' | 'observer'; ready: boolean }; members: { id: string; nickname: string; role: string; ready: boolean }[] };
+type Room = { id: string; version: number; mode: Mode; status: string; durationSeconds: number; retellStyle: string; topic: string; roundId: string | null; stage: Stage | null; terminalReason?: string | null; roundVersion: number | null; activeSeat: 'speaker' | 'listener' | null; deadlineAt: string | null; speakerAudioId: string | null; listenerAudioId: string | null; previousPractice: { complete: number; total: number } | null; teen: { nickname: string; role: 'speaker' | 'listener'; locked: boolean; completed: boolean } | null; you: { role: 'speaker' | 'listener' | 'observer'; ready: boolean; owner?: boolean }; members: { id: string; nickname: string; role: string; ready: boolean }[] };
 const names = { speaker: '表达者', listener: '复述者', observer: '观察者' };
 const messages: Record<string, string> = {
   RATE_LIMITED: '操作太频繁，请稍后再试。',
@@ -189,6 +189,7 @@ export function RoomFlow({ mode, onRoomChange }: { mode: string | null; onRoomCh
   const mustReturn = teen?.locked && !childTurn;
   const waiting = room?.status === 'WAITING' && (room.stage !== 'ARCHIVED' || reportDismissed === room.roundId);
   const pendingInvite = room?.mode === 'async' && room.stage === 'ASYNC_PENDING' && !room.members.some(member => member.role === 'listener');
+  const ownsRoom = room?.you.owner ?? room?.you.role === 'speaker';
   const guardianPanel = room && teen?.locked && (unlockOpen || mustReturn) && <div className="card">
     <h2>{mustReturn ? '请把手机交还监护人' : '监护人验证'}</h2>
     <label>监护人退出码<input type="password" inputMode="numeric" autoComplete="off" maxLength={6} value={unlockPin} onChange={event => setUnlockPin(event.target.value)} /></label>
@@ -222,7 +223,7 @@ export function RoomFlow({ mode, onRoomChange }: { mode: string | null; onRoomCh
       {room.you.role === 'speaker' && <button className="secondary" disabled={busy || !room.you.ready || (room.mode === 'sync' && !room.members.some(m => m.role === 'listener' && m.ready))} onClick={start}>开始本轮</button>}
       {room.stage === 'CANCELLED' && <p className="notice" role="status">{room.terminalReason === 'COMPARISON_FAILED' ? '本轮对照未能完成，请重新准备后开始一轮。' : '本轮已超时，请重新准备后开始一轮。'}</p>}
     </div>}
-    {room && !guardianPanel && room.you.role === 'speaker' && !sameDevice && (waiting || pendingInvite) && <section className="card invite-card">
+    {room && !guardianPanel && ownsRoom && !sameDevice && (waiting || pendingInvite) && <section className="card invite-card">
         <h2>邀请搭档</h2>
         <div className="option-grid" aria-label="邀请角色">
           <button className={inviteRole === 'listener' ? 'chosen' : ''} onClick={() => { if (inviteRole !== 'listener') { setInviteRole('listener'); setInvite(null); setShareUrl(''); } }}>复述者</button>
@@ -279,13 +280,13 @@ export function RoomFlow({ mode, onRoomChange }: { mode: string | null; onRoomCh
         {['SPEAKER_LABELING', 'MUTUAL_CONFIRM', 'ADVICE', 'ARCHIVED'].includes(room.stage ?? '') && <ComparisonView key={room.roundId} roundId={room.roundId} stage={room.stage!} version={room.roundVersion} role={roundRole ?? room.you.role} solo={sameDevice} labeling={labeling} onLabeling={() => setLabelingRound(room.roundId)} onChanged={() => refresh(room.id)} />}
         {room.stage === 'ADVICE' && room.you.role === 'speaker' && <button className="primary" disabled={busy} onClick={prepareNext}>归档本轮并查看报告</button>}
         {room.stage === 'ARCHIVED' && <button className="primary" onClick={() => setReportDismissed(room.roundId)}>返回训练室，准备下一轮</button>}
-        {room.stage === 'ARCHIVED' && room.mode === 'sync' && room.you.role === 'speaker' && room.members.some(member => member.role === 'listener') &&
+        {room.stage === 'ARCHIVED' && room.mode === 'sync' && ownsRoom && room.members.some(member => member.role === 'listener') &&
           <button className="secondary" disabled={busy} onClick={() => void run(async () => {
             setRoom(await call<Room>(`/api/rooms/${room.id}/swap-seats`, { expectedVersion: room.version }));
             setInvite(null); setShareUrl(''); setReportDismissed(room.roundId);
           })}>交换表达者与复述者</button>}
       </div>
     </>}
-    {room && !guardianPanel && <button className="danger" disabled={busy} onClick={teen?.locked ? () => setUnlockOpen(true) : leave}>{teen?.locked ? '交还监护人' : room.you.role === 'speaker' ? '结束并关闭训练室' : '离开训练室'}</button>}
+    {room && !guardianPanel && <button className="danger" disabled={busy} onClick={teen?.locked ? () => setUnlockOpen(true) : leave}>{teen?.locked ? '交还监护人' : ownsRoom ? '结束并关闭训练室' : '离开训练室'}</button>}
   </section>;
 }

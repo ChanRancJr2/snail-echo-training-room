@@ -26,7 +26,8 @@ public class RoomService {
     record CreateResult(State state, String inviteToken) {}
     record PublicInvite(String token, String role, int minutes, int maxUses) {}
     record Participant(String id, String nickname, String role, boolean ready) {}
-    record You(String memberId, String role, boolean ready) {}
+    record You(String memberId, String role, boolean ready, boolean owner) {}
+    record RecordingState(String stage, Instant deadlineAt, long version) {}
     record State(String id, String mode, String status, int durationSeconds, String retellStyle,
                  String topic, long version, String roundId, String stage, Instant deadlineAt,
                  Long roundVersion, String activeSeat, You you, List<Participant> members) {}
@@ -58,7 +59,8 @@ public class RoomService {
 
     public PublicInvite invite(String roomId, String actor, String role, int minutes, int maxUses, String password) {
         var room = lockRoom(roomId);
-        requireSpeaker(member(database.members(roomId), actor));
+        member(database.members(roomId), actor);
+        if (!actor.equals(room.ownerId())) throw new ApiFailure(403, "FORBIDDEN_ROLE");
         requireWaiting(room);
         return newInvite(roomId, role, minutes, maxUses, password);
     }
@@ -85,7 +87,8 @@ public class RoomService {
         database.removeExpiredMembers(roomId);
         var members = database.members(roomId);
         var existing = members.stream().filter(m -> m.sessionId().equals(actor)).findFirst().orElse(null);
-        if (existing != null && invitation.id().equals(existing.invitationId())) return state(room, actor, members);
+        if (existing != null && invitation.id().equals(existing.invitationId())
+                && invitation.role().equals(existing.role())) return state(room, actor, members);
         if (!invitation.expiresAt().isAfter(Instant.now()) || invitation.useCount() >= invitation.maxUses()) {
             throw new ApiFailure(410, "INVITATION_EXPIRED");
         }
@@ -121,18 +124,110 @@ public class RoomService {
         requireSpeaker(speaker);
         if ("ACTIVE".equals(room.status())) return state(room, actor, members);
         requireWaiting(room);
-        boolean listenerReady = members.stream().anyMatch(m -> "listener".equals(m.role()) && m.ready());
-        if (!speaker.ready() || !listenerReady) throw new ApiFailure(409, "PLAYERS_NOT_READY");
-        database.startRound(uuid(), roomId);
+        var listener = members.stream().filter(m -> "listener".equals(m.role()) && m.ready()).findFirst().orElse(null);
+        if (!speaker.ready() || listener == null) throw new ApiFailure(409, "PLAYERS_NOT_READY");
+        var previous = database.latestRound(roomId);
+        int sequence = previous == null ? 1 : previous.sequenceNo() + 1;
+        database.startRound(uuid(), roomId, sequence, speaker.sessionId(), listener.sessionId());
         database.setStatus(roomId, "ACTIVE");
         return state(database.room(roomId), actor, members);
+    }
+
+    public RecordingState beginRecording(String roundId, String actor, long expectedVersion, String focus) {
+        var room = lockRecordingRoom(roundId, actor);
+        if (database.beginRecording(roundId, expectedVersion, room.durationSeconds(), focus) != 1) {
+            throw new ApiFailure(409, "STALE_VERSION");
+        }
+        return recordingState(room.id());
+    }
+
+    public RecordingState restartRecording(String roundId, String actor, long expectedVersion, String kind) {
+        var room = lockRecordingRoom(roundId, actor);
+        if (!"speaker".equals(kind)) throw new ApiFailure(409, "WRONG_STAGE");
+        if (database.restartRecording(roundId, expectedVersion, room.durationSeconds()) != 1) {
+            throw new ApiFailure(409, "STALE_VERSION");
+        }
+        return recordingState(room.id());
+    }
+
+    private RoomMapper.Room lockRecordingRoom(String roundId, String actor) {
+        String roomId = database.roundRoom(roundId);
+        if (roomId == null) throw new ApiFailure(404, "ROUND_NOT_FOUND");
+        var room = lockRoom(roomId);
+        member(database.members(roomId), actor);
+        var latest = database.latestRound(roomId);
+        if (!"ACTIVE".equals(room.status()) || latest == null || !roundId.equals(latest.id())) {
+            throw new ApiFailure(409, "STALE_VERSION");
+        }
+        if (!actor.equals(latest.speakerSessionId())) throw new ApiFailure(403, "FORBIDDEN_ROLE");
+        return room;
+    }
+
+    private RecordingState recordingState(String roomId) {
+        var updated = database.latestRound(roomId);
+        return new RecordingState(updated.stage(), updated.deadlineAt(), updated.version());
+    }
+
+    public void expireRecording(RoomMapper.DueRecording due) {
+        var room = lockRoom(due.roomId());
+        if (!"ACTIVE".equals(room.status())) return;
+        var latest = database.latestRound(room.id());
+        if (latest == null || !due.id().equals(latest.id()) || database.expireRecording(due.id(), due.version()) != 1) return;
+        database.resetReadiness(room.id());
+        database.setStatus(room.id(), "WAITING");
+    }
+
+    public State prepareNext(String roomId, String actor, String roundId, long expectedVersion) {
+        var room = lockRoom(roomId);
+        var members = database.members(roomId);
+        member(members, actor);
+        if ("CLOSED".equals(room.status())) throw new ApiFailure(404, "ROOM_CLOSED");
+        var latest = database.latestRound(roomId);
+        if (latest == null || !roundId.equals(latest.id())) throw new ApiFailure(409, "STALE_VERSION");
+        if (!actor.equals(latest.speakerSessionId())) throw new ApiFailure(403, "FORBIDDEN_ROLE");
+        if ("WAITING".equals(room.status()) && "ARCHIVED".equals(latest.stage())
+                && (latest.version() == expectedVersion || latest.version() - 1 == expectedVersion)) {
+            return state(room, actor, members);
+        }
+        if (!"ACTIVE".equals(room.status())) throw new ApiFailure(409, "WRONG_STAGE");
+        if (latest.version() != expectedVersion) throw new ApiFailure(409, "STALE_VERSION");
+        if (!"ARCHIVED".equals(latest.stage()) && database.archive(roundId, expectedVersion) != 1) {
+            throw new ApiFailure(409, "WRONG_STAGE");
+        }
+        database.resetReadiness(roomId);
+        database.setStatus(roomId, "WAITING");
+        return state(database.room(roomId), actor, database.members(roomId));
+    }
+
+    public State swapSeats(String roomId, String actor, long expectedVersion) {
+        var room = lockRoom(roomId);
+        var members = database.members(roomId);
+        member(members, actor);
+        if (!actor.equals(room.ownerId())) throw new ApiFailure(403, "FORBIDDEN_ROLE");
+        if (room.version() != expectedVersion) throw new ApiFailure(409, "STALE_VERSION");
+        requireWaiting(room);
+        var latest = database.latestRound(roomId);
+        if (latest == null || !"ARCHIVED".equals(latest.stage())) throw new ApiFailure(409, "WRONG_STAGE");
+        var speaker = members.stream().filter(m -> "speaker".equals(m.role())).findFirst().orElse(null);
+        var listener = members.stream().filter(m -> "listener".equals(m.role())).findFirst().orElse(null);
+        if (speaker == null || listener == null) throw new ApiFailure(409, "PLAYERS_NOT_READY");
+
+        // Hold the room lock and keep the unique role constraint through all three updates.
+        database.setRole(speaker.id(), "swapping");
+        database.setRole(listener.id(), "speaker");
+        database.setRole(speaker.id(), "listener");
+        database.resetReadiness(roomId);
+        database.revokeInvites(roomId);
+        database.advanceVersion(roomId);
+        return state(database.room(roomId), actor, database.members(roomId));
     }
 
     public String leave(String roomId, String actor) {
         var room = lockRoom(roomId);
         var member = member(database.members(roomId), actor);
         if ("CLOSED".equals(room.status())) return "CLOSED";
-        if ("speaker".equals(member.role()) || ("listener".equals(member.role()) && "ACTIVE".equals(room.status()))) {
+        if (actor.equals(room.ownerId()) || (!"observer".equals(member.role()) && "ACTIVE".equals(room.status()))) {
+            database.cancelActiveRound(roomId);
             database.setStatus(roomId, "CLOSED");
             return "CLOSED";
         }
@@ -144,12 +239,12 @@ public class RoomService {
     private State state(RoomMapper.Room room, String actor, List<RoomMapper.Member> members) {
         var me = member(members, actor);
         if ("CLOSED".equals(room.status())) throw new ApiFailure(404, "ROOM_CLOSED");
-        var round = "ACTIVE".equals(room.status()) ? database.latestRound(room.id()) : null;
+        var round = database.latestRound(room.id());
         var participants = members.stream().map(m -> new Participant(m.id(), m.nickname(), m.role(), m.ready())).toList();
         return new State(room.id(), "sync", room.status(), room.durationSeconds(), room.retellStyle(), room.topic(),
                 room.version(), round == null ? null : round.id(), round == null ? null : round.stage(),
                 round == null ? null : round.deadlineAt(), round == null ? null : round.version(),
-                null, new You(me.id(), me.role(), me.ready()), participants);
+                null, new You(me.id(), me.role(), me.ready(), actor.equals(room.ownerId())), participants);
     }
 
     private RoomMapper.Room lockRoom(String roomId) {

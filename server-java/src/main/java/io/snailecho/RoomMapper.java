@@ -7,10 +7,14 @@ import org.apache.ibatis.annotations.*;
 
 @Mapper
 interface RoomMapper {
-    record Room(String id, String status, int durationSeconds, String retellStyle, String topic, long version) {}
+    record Room(String id, String ownerId, String status, int durationSeconds, String retellStyle, String topic, long version) {}
     record Member(String id, String sessionId, String nickname, String role, boolean ready, String invitationId) {}
     record Invite(String id, String roomId, String role, String passwordHash, Instant expiresAt, int maxUses, int useCount) {}
-    record Round(String id, String stage, Instant deadlineAt, long version) {}
+    record Round(String id, int sequenceNo, String stage, Instant deadlineAt, long version,
+                 String speakerSessionId, String listenerSessionId) {}
+    record DueRecording(String id, String roomId, long version) {}
+
+    String RECORDING_GRACE_CUTOFF = "TIMESTAMPADD(SECOND, -30, CURRENT_TIMESTAMP(6))";
 
     @Insert("INSERT INTO anonymous_sessions (id, token_hash, nickname, expires_at) VALUES (#{s.id}, #{hash}, #{s.nickname}, #{s.expiresAt})")
     void insertSession(@Param("s") SessionService.Session session, @Param("hash") String hash);
@@ -21,7 +25,7 @@ interface RoomMapper {
     @Select("SELECT id FROM anonymous_sessions WHERE id = #{id} AND expires_at > CURRENT_TIMESTAMP(6) FOR UPDATE")
     String lockSession(String id);
 
-    String ROOM_COLUMNS = "id, status, duration_seconds, retell_style, topic, version";
+    String ROOM_COLUMNS = "id, owner_id, status, duration_seconds, retell_style, topic, version";
 
     @Select("SELECT " + ROOM_COLUMNS + " FROM rooms WHERE id = #{id}")
     Room room(String id);
@@ -78,15 +82,75 @@ interface RoomMapper {
         """)
     void insertInvite(@Param("i") Invite invite, @Param("tokenHash") String tokenHash);
 
-    @Select("SELECT id, room_id, role, password_hash, expires_at, max_uses, use_count FROM invitations WHERE token_hash = #{hash}")
+    @Select("""
+        SELECT id, room_id, role, password_hash,
+            COALESCE(revoked_at, expires_at) AS expires_at, max_uses, use_count
+        FROM invitations WHERE token_hash = #{hash}
+        """)
     Invite invite(String hash);
 
     @Update("UPDATE invitations SET use_count = use_count + 1 WHERE id = #{id}")
     void consumeInvite(String id);
 
-    @Select("SELECT id, stage, deadline_at, version FROM rounds WHERE room_id = #{id} ORDER BY sequence_no DESC LIMIT 1")
+    @Select("""
+        SELECT id, sequence_no, stage, deadline_at, version, speaker_session_id, listener_session_id
+        FROM rounds WHERE room_id = #{id} ORDER BY sequence_no DESC LIMIT 1
+        """)
     Round latestRound(String id);
 
-    @Insert("INSERT INTO rounds (id, room_id, sequence_no, stage) VALUES (#{id}, #{room}, 1, 'TASK')")
-    void startRound(@Param("id") String id, @Param("room") String room);
+    @Insert("""
+        INSERT INTO rounds (id, room_id, sequence_no, stage, speaker_session_id, listener_session_id)
+        VALUES (#{id}, #{room}, #{sequence}, 'TASK', #{speaker}, #{listener})
+        """)
+    void startRound(@Param("id") String id, @Param("room") String room, @Param("sequence") int sequence,
+                    @Param("speaker") String speakerSessionId, @Param("listener") String listenerSessionId);
+
+    @Select("SELECT room_id FROM rounds WHERE id = #{id}")
+    String roundRoom(String id);
+
+    @Update("""
+        UPDATE rounds SET stage = 'SPEAKER_RECORDING', focus = #{focus},
+            deadline_at = TIMESTAMPADD(SECOND, #{seconds}, CURRENT_TIMESTAMP(6)), version = version + 1
+        WHERE id = #{id} AND version = #{version} AND stage = 'TASK'
+        """)
+    int beginRecording(@Param("id") String id, @Param("version") long version,
+                       @Param("seconds") int seconds, @Param("focus") String focus);
+
+    @Update("""
+        UPDATE rounds SET deadline_at = TIMESTAMPADD(SECOND, #{seconds}, CURRENT_TIMESTAMP(6)), version = version + 1
+        WHERE id = #{id} AND version = #{version} AND stage = 'SPEAKER_RECORDING' AND deadline_at >
+        """ + RECORDING_GRACE_CUTOFF)
+    int restartRecording(@Param("id") String id, @Param("version") long version, @Param("seconds") int seconds);
+
+    @Select("""
+        SELECT id, room_id, version FROM rounds WHERE stage = 'SPEAKER_RECORDING' AND deadline_at <=
+        """ + RECORDING_GRACE_CUTOFF + " ORDER BY deadline_at, id LIMIT 50")
+    List<DueRecording> dueRecordings();
+
+    @Update("""
+        UPDATE rounds SET stage = 'CANCELLED', deadline_at = NULL, version = version + 1
+        WHERE id = #{id} AND version = #{version} AND stage = 'SPEAKER_RECORDING' AND deadline_at <=
+        """ + RECORDING_GRACE_CUTOFF)
+    int expireRecording(@Param("id") String id, @Param("version") long version);
+
+    @Update("UPDATE room_members SET role = #{role} WHERE id = #{id}")
+    void setRole(@Param("id") String id, @Param("role") String role);
+
+    @Update("UPDATE invitations SET revoked_at = CURRENT_TIMESTAMP(6) WHERE room_id = #{id} AND revoked_at IS NULL")
+    void revokeInvites(String id);
+
+    @Update("""
+        UPDATE rounds SET stage = 'ARCHIVED', deadline_at = NULL, version = version + 1
+        WHERE id = #{id} AND version = #{version} AND stage = 'ADVICE'
+        """)
+    int archive(@Param("id") String id, @Param("version") long version);
+
+    @Update("UPDATE room_members SET ready = FALSE WHERE room_id = #{id} AND ready = TRUE")
+    void resetReadiness(String id);
+
+    @Update("""
+        UPDATE rounds SET stage = 'CANCELLED', deadline_at = NULL, version = version + 1
+        WHERE room_id = #{id} AND stage NOT IN ('ARCHIVED', 'CANCELLED')
+        """)
+    void cancelActiveRound(String id);
 }

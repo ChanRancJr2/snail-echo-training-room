@@ -44,6 +44,11 @@ class RoomController {
                          @Size(min = 6, max = 100) String password) {}
     record JoinRequest(@NotNull String token, @Size(max = 100) String password) {}
     record ReadyRequest(@NotNull Boolean ready) {}
+    record NextRoundRequest(@NotNull UUID roundId, @NotNull @Min(1) Long expectedVersion) {}
+    record VersionRequest(@NotNull @Min(1) Long expectedVersion) {}
+    record TaskRequest(@NotNull @Min(1) Long expectedVersion, @Size(max = 80) String focus) {}
+    record RestartRequest(@NotNull @Min(1) Long expectedVersion,
+                          @NotNull @Pattern(regexp = "speaker|listener") String kind) {}
 
     @GetMapping("/health/live")
     Map<String, String> live() {
@@ -52,8 +57,13 @@ class RoomController {
 
     @PostMapping("/api/sessions/anonymous")
     ResponseEntity<SessionService.Session> session(@RequestHeader(value = "Origin", required = false) String from,
+                                                   @CookieValue(value = SESSION, required = false) String token,
                                                    @Valid @RequestBody SessionRequest request) {
         checkOrigin(from);
+        var current = sessions.find(token);
+        if (current != null && request.nickname() == null) {
+            return ResponseEntity.ok().cacheControl(CacheControl.noStore()).body(current);
+        }
         var issued = sessions.create(request.nickname());
         var cookie = ResponseCookie.from(SESSION, issued.token()).httpOnly(true).sameSite("Lax").path("/")
                 .secure(origin.startsWith("https://")).maxAge(Duration.ofHours(12)).build();
@@ -116,6 +126,39 @@ class RoomController {
                             @RequestHeader(value = "Origin", required = false) String from,
                             @CookieValue(value = SESSION, required = false) String cookie) {
         return rooms.start(roomId.toString(), actor(from, cookie));
+    }
+
+    @PostMapping("/api/rooms/{roomId}/next-round")
+    RoomService.State nextRound(@PathVariable UUID roomId,
+                                @RequestHeader(value = "Origin", required = false) String from,
+                                @CookieValue(value = SESSION, required = false) String cookie,
+                                @Valid @RequestBody NextRoundRequest request) {
+        return rooms.prepareNext(roomId.toString(), actor(from, cookie), request.roundId().toString(), request.expectedVersion());
+    }
+
+    @PostMapping("/api/rooms/{roomId}/swap-seats")
+    RoomService.State swapSeats(@PathVariable UUID roomId,
+                                @RequestHeader(value = "Origin", required = false) String from,
+                                @CookieValue(value = SESSION, required = false) String cookie,
+                                @Valid @RequestBody VersionRequest request) {
+        return rooms.swapSeats(roomId.toString(), actor(from, cookie), request.expectedVersion());
+    }
+
+    @PostMapping("/api/rounds/{roundId}/task")
+    RoomService.RecordingState beginRecording(@PathVariable UUID roundId,
+                                               @RequestHeader(value = "Origin", required = false) String from,
+                                               @CookieValue(value = SESSION, required = false) String cookie,
+                                               @Valid @RequestBody TaskRequest request) {
+        return rooms.beginRecording(roundId.toString(), actor(from, cookie), request.expectedVersion(),
+                request.focus() == null ? "" : request.focus().strip());
+    }
+
+    @PostMapping("/api/rounds/{roundId}/restart-recording")
+    RoomService.RecordingState restartRecording(@PathVariable UUID roundId,
+                                                 @RequestHeader(value = "Origin", required = false) String from,
+                                                 @CookieValue(value = SESSION, required = false) String cookie,
+                                                 @Valid @RequestBody RestartRequest request) {
+        return rooms.restartRecording(roundId.toString(), actor(from, cookie), request.expectedVersion(), request.kind());
     }
 
     @PostMapping("/api/rooms/{roomId}/leave")

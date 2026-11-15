@@ -29,17 +29,23 @@ public class SessionService {
     Issued create(String nickname) {
         String token = newToken();
         String name = nickname == null || nickname.isBlank() ? "访客" : nickname.strip();
-        var session = new Session(UUID.randomUUID().toString(), name, Instant.now().plus(12, ChronoUnit.HOURS));
+        var session = new Session(UUID.randomUUID().toString(), name,
+                Instant.now().plus(12, ChronoUnit.HOURS).truncatedTo(ChronoUnit.MICROS));
         database.insertSession(session, hash(token));
         return new Issued(session, token);
     }
 
     Session require(String token) {
-        var session = validToken(token) ? database.findSession(hash(token)) : null;
-        if (session == null || !session.expiresAt().isAfter(Instant.now())) {
+        var session = find(token);
+        if (session == null) {
             throw new ApiFailure(401, "UNAUTHENTICATED");
         }
         return session;
+    }
+
+    Session find(String token) {
+        var session = validToken(token) ? database.findSession(hash(token)) : null;
+        return session != null && session.expiresAt().isAfter(Instant.now()) ? session : null;
     }
 
     static boolean validToken(String token) {

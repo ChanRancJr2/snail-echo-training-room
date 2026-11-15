@@ -9,6 +9,11 @@ spring:
     url: ${JAVA_DB_URL}
     username: ${JAVA_DB_USER}
     password: ${JAVA_DB_PASSWORD}
+    hikari:
+      data-source-properties:
+        connectionTimeZone: '+00:00'
+        forceConnectionTimeZoneToSession: 'true'
+        preserveInstants: 'true'
   jackson:
     deserialization:
       fail-on-unknown-properties: true
