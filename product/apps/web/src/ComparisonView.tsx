@@ -5,7 +5,7 @@ import { nextPractice } from './flow.ts';
 
 type Resolution = 'misunderstanding' | 'expression' | 'ai_error';
 type Item = { id: string; category: string; original: string; speakerQuote: string | null; listenerQuote: string; complete: boolean; accurate: boolean; tag: string | null; clarification: string | null; resolution: Resolution | null; speakerConfirmed: boolean; listenerConfirmed: boolean; listenerNote: string | null; observerTag: string | null; observerNote: string | null };
-type Result = { total: number; complete: number; accurate: number; issues: Item[]; adviceAccepted: boolean; transcripts?: { speaker: string; listener: string }; report?: { topic: string; focus: string; speaker: string; listener: string; speakerAudioId: string | null; listenerAudioId: string | null; hintLevel: number } };
+type Result = { total: number; complete: number; accurate: number; issues: Item[]; adviceAccepted: boolean; provider?: 'mock'; transcripts?: { speaker: string; listener: string }; report?: { topic: string; focus: string; speaker: string; listener: string; speakerAudioId: string | null; listenerAudioId: string | null; hintLevel: number } };
 const sentences = (text: string) => text.match(/[^。！？!?\n]+[。！？!?]?/g)?.map(value => value.trim()).filter(Boolean) ?? [];
 const tags = ['遗漏重要信息', '理解不到位', '理解偏了', '杜撰信息', '强加信息', '我表达不清', '我言不达意', '语气被误解', '重点被误解', 'AI 误判'];
 const resolutions: [Resolution, string][] = [['misunderstanding', '真误解'], ['expression', '表达问题'], ['ai_error', 'AI 误判']];
@@ -65,7 +65,8 @@ export function ComparisonView({ roundId, stage, version, role, solo, labeling =
     {role !== 'speaker' && <p role="status">等待表达者归档本轮。</p>}
     {role === 'speaker' && <button className="secondary" disabled={busy || result.adviceAccepted} onClick={() => void send('adopt', {})}>{result.adviceAccepted ? '已采纳' : '采纳这条建议'}</button>}
   </section>;
-  return <section className="comparison-view"><p>{isReport ? '本轮报告已归档。' : 'AI 提供辅助提示。双方逐条确认最终结论。'}</p>
+  return <section className="comparison-view"><p>{isReport ? '本轮报告已归档。' : '双方逐条确认最终结论。'}</p>
+    {result.provider === 'mock' ? <p className="notice">演示对照使用预置转写和文字匹配。</p> : !isReport && <p>AI 提供辅助提示。</p>}
     {error && <p role="alert" className="error-text">{error}</p>}
     {report && seats && <>
       <label className="toggle-row"><input type="checkbox" checked={anonymous} onChange={event => setAnonymous(event.target.checked)} /> 匿名显示座位代号</label>
@@ -110,6 +111,7 @@ export function ComparisonView({ roundId, stage, version, role, solo, labeling =
         <button className="secondary" disabled={busy} onClick={() => void send('observe', { issueId: item.id, tag: item.observerTag ?? tags[0], note: item.observerNote ?? '', ...observations[item.id] })}>提交观察建议</button>
       </div>}
       {isReport && item.resolution && <p>已确认结论：{resolutions.find(([value]) => value === item.resolution)?.[1]}</p>}
+      {stage === 'MUTUAL_CONFIRM' && item.resolution && <p>待双方确认的结论：{resolutions.find(([value]) => value === item.resolution)?.[1]}</p>}
       {(!item.complete || !item.accurate) && editable && <>
         {role === 'speaker' && <div className="review-fields"><label>标签<select aria-label={`${item.category}标签`} value={choices[item.id]?.tag ?? item.tag ?? tags[0]} onChange={event => setChoices(current => ({ ...current, [item.id]: { tag: event.target.value, resolution: current[item.id]?.resolution ?? 'misunderstanding' } }))}>{tags.map(tag => <option key={tag}>{tag}</option>)}</select></label>
           <label>结论<select aria-label={`${item.category}结论`} value={choices[item.id]?.resolution ?? item.resolution ?? 'misunderstanding'} onChange={event => setChoices(current => ({ ...current, [item.id]: { tag: current[item.id]?.tag ?? item.tag ?? tags[0]!, resolution: event.target.value as Resolution } }))}>{resolutions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label></div>}

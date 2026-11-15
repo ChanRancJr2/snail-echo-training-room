@@ -37,7 +37,13 @@ interface TranscriptionMapper {
     @Select("SELECT COUNT(*) FROM transcription_jobs" + OWNED)
     int owned(@Param("audio") String audioId, @Param("lease") String lease);
 
-    @Update("UPDATE transcription_jobs SET status = 'DONE', lease_token = NULL, result_ciphertext = #{result}" + OWNED)
+    @Update("UPDATE transcription_jobs SET status = 'DONE', lease_token = NULL, result_ciphertext = #{result}" + OWNED + """
+        AND EXISTS (
+            SELECT 1 FROM rounds r WHERE r.id = transcription_jobs.round_id
+              AND (r.speaker_audio_id = #{audio}
+                OR (r.listener_audio_id = #{audio} AND r.deadline_at > CURRENT_TIMESTAMP(6)))
+        )
+        """)
     int succeed(@Param("audio") String audioId, @Param("lease") String lease, @Param("result") byte[] result);
 
     @Update("""
@@ -48,4 +54,10 @@ interface TranscriptionMapper {
 
     @Update("UPDATE transcription_jobs SET status = 'CANCELLED', lease_token = NULL" + OWNED)
     int cancel(@Param("audio") String audioId, @Param("lease") String lease);
+
+    @Update("""
+        UPDATE transcription_jobs SET status = 'CANCELLED', lease_token = NULL
+        WHERE round_id = #{id} AND status IN ('PENDING', 'RUNNING')
+        """)
+    void cancelPendingForRound(String id);
 }

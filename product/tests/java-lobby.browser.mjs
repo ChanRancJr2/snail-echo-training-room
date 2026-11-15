@@ -106,8 +106,56 @@ try {
         await submit.waitFor();
         assert.equal(await submit.isDisabled(), true);
         await guest.getByRole('checkbox', { name: /我知晓复述录音提交后会被转写/ }).check();
+        const comparisonCommit = guest.waitForResponse(response => response.url().endsWith('/commit') && response.ok());
         await submit.click();
-        await guest.getByText('正在转写复述录音并生成逐条对照，请稍候。').waitFor();
+        assert.equal((await (await comparisonCommit).json()).round.stage, 'COMPARING');
+        await host.getByText('演示对照使用预置转写和文字匹配。').waitFor();
+        if (observer) {
+          await observer.getByRole('textbox', { name: '第 1 条观察建议' }).fill('可以问清聚餐前提');
+          await observer.getByRole('button', { name: '提交观察建议' }).click();
+          await host.getByText(/观察者建议.*可以问清聚餐前提/).waitFor();
+        }
+        await host.getByRole('button', { name: '请表达者逐条标注' }).click();
+        await host.getByRole('combobox', { name: /结论/ }).selectOption('expression');
+        await host.getByRole('button', { name: '提交标注，邀请双方确认' }).click();
+        const reviewSubmit = host.getByRole('button', { name: '表达者提交，查看改写建议' });
+        await reviewSubmit.waitFor();
+        assert.equal(await reviewSubmit.isDisabled(), true);
+        await host.getByRole('button', { name: '确认这一条' }).click();
+        await guest.getByText('待双方确认的结论：表达问题').waitFor();
+        await guest.getByText('表达者：已确认 · 复述者：待确认').waitFor();
+        await guest.getByRole('button', { name: '确认这一条' }).click();
+        assert.equal(await guest.getByRole('button', { name: '表达者提交，查看改写建议' }).count(), 0);
+        await reviewSubmit.click();
+        await host.getByRole('heading', { name: '下一次可以这样确认' }).waitFor();
+        await host.getByRole('button', { name: '采纳这条建议' }).click();
+        await host.getByRole('button', { name: '已采纳' }).waitFor();
+        await host.getByRole('button', { name: '归档本轮并查看报告' }).click();
+        await guest.getByText('本轮报告已归档。').waitFor();
+        if (observer) {
+          const snapshot = await (await observer.request.get(`${origin}/api/rooms/${state.id}`)).json();
+          assert.equal(snapshot.stage, null);
+          assert.equal(snapshot.speakerAudioId, null);
+          assert.equal(snapshot.listenerAudioId, null);
+        }
+        await guest.getByRole('checkbox', { name: '匿名显示座位代号' }).check();
+        await guest.getByText('座位 A / 座位 B', { exact: false }).waitFor();
+        const exportReport = await guest.getByRole('link', { name: '导出本轮报告（TXT）' }).getAttribute('href');
+        assert.match(decodeURIComponent(exportReport), /座位 A\n座位 B/);
+        assert.doesNotMatch(decodeURIComponent(exportReport), /先看望家人/);
+        await host.getByRole('button', { name: '返回训练室，准备下一轮' }).click();
+        await guest.getByRole('button', { name: '返回训练室，准备下一轮' }).click();
+        await host.getByRole('button', { name: '准备好了' }).click();
+        assert.equal(await host.getByRole('button', { name: '开始本轮' }).isDisabled(), true);
+        await guest.getByRole('button', { name: '准备好了' }).click();
+        const secondStart = host.waitForResponse(response => response.url().endsWith('/start') && response.ok());
+        await host.getByRole('button', { name: '开始本轮' }).click();
+        const next = await (await secondStart).json();
+        assert.equal(next.stage, 'TASK');
+        assert.equal(next.deadlineAt, null);
+        assert.notEqual(next.roundId, snapshot.roundId);
+        assert.deepEqual(next.previousPractice, { complete: 0, total: 1 });
+        await host.getByText(/上轮采纳的建议/).waitFor();
       }
     }
     await host.getByRole('button', { name: '结束并关闭训练室' }).click();
@@ -121,7 +169,7 @@ try {
   assert.notEqual(first.roundId, second.roundId);
   console.log('Three Java browser sessions passed: startup, reload, recording, re-recording and reversed roles in a fresh room.');
   if (verifyUpload) console.log('Both browser recordings reached confirmed storage and authorized range playback.');
-  if (verifyProcessing) console.log('Both rounds reached listener submission through Mock transcription, point confirmation and playback.');
+  if (verifyProcessing) console.log('Both practice rooms passed Mock transcription, comparison, mutual confirmation, anonymous export and same-room restart.');
 } finally {
   await browser.close();
 }

@@ -398,6 +398,80 @@ class RoomFlowTest {
             worker.runOne();
             return "DONE".equals(database.queryForObject("SELECT status FROM transcription_jobs WHERE audio_id = ?", String.class, listenerId));
         });
+        org.awaitility.Awaitility.await().atMost(Duration.ofSeconds(8)).untilAsserted(() ->
+                assertThat(get(path + "/comparison", fixture.speaker()).statusCode()).isEqualTo(200));
+        var comparison = body(get(path + "/comparison", fixture.speaker()));
+        assertThat(comparison.at("/total").asInt()).isEqualTo(1);
+        assertThat(comparison.at("/complete").asInt()).isZero();
+        assertThat(comparison.at("/issues/0/speakerQuote").asText()).contains("先看望家人");
+        assertThat(comparison.at("/issues/0/listenerQuote").asText()).contains("讨论聚餐安排");
+        String issue = comparison.at("/issues/0/id").asText();
+        long reviewVersion = listener.at("/round/version").asLong() + 1;
+        var label = Map.of("expectedVersion", reviewVersion, "labels", java.util.List.of(
+                Map.of("issueId", issue, "tag", "理解偏了", "resolution", "misunderstanding")));
+        String review = path + "/review/";
+        assertThat(get(path + "/comparison", session()).statusCode()).isEqualTo(403);
+        assertThat(post(review + "label", label, fixture.listener()).statusCode()).isEqualTo(403);
+        assertThat(post(review + "label", label, fixture.speaker()).statusCode()).isEqualTo(200);
+        assertThat(post(review + "confirm", Map.of("expectedVersion", ++reviewVersion, "issueId", issue),
+                fixture.speaker()).statusCode()).isEqualTo(200);
+        assertThat(post(review + "submit", Map.of("expectedVersion", ++reviewVersion),
+                fixture.speaker()).statusCode()).isEqualTo(409);
+        assertThat(post(review + "confirm", Map.of("expectedVersion", reviewVersion - 1, "issueId", issue),
+                fixture.listener()).statusCode()).isEqualTo(409);
+        assertThat(post(review + "clarify", Map.of("expectedVersion", reviewVersion, "issueId", issue,
+                "note", "没有说清聚餐的前提"), fixture.listener()).statusCode()).isEqualTo(200);
+        var clarified = body(get(path + "/comparison", fixture.speaker()));
+        assertThat(clarified.at("/issues/0/speakerConfirmed").asBoolean()).isFalse();
+        assertThat(clarified.at("/issues/0/listenerNote").asText()).isEqualTo("没有说清聚餐的前提");
+        assertThat(post(review + "confirm", Map.of("expectedVersion", ++reviewVersion, "issueId", issue),
+                fixture.speaker()).statusCode()).isEqualTo(200);
+        ++reviewVersion;
+        assertThat(post(review + "confirm", Map.of("expectedVersion", reviewVersion, "issueId", issue),
+                fixture.listener()).statusCode()).isEqualTo(200);
+        assertThat(post(review + "submit", Map.of("expectedVersion", ++reviewVersion),
+                fixture.listener()).statusCode()).isEqualTo(403);
+        assertThat(post(review + "submit", Map.of("expectedVersion", reviewVersion),
+                fixture.speaker()).statusCode()).isEqualTo(200);
+        var archived = post(fixture.room() + "/next-round",
+                Map.of("roundId", fixture.roundId(), "expectedVersion", ++reviewVersion), fixture.speaker());
+        assertThat(archived.statusCode()).isEqualTo(200);
+        var report = body(get(path + "/comparison", fixture.listener()));
+        assertThat(report.at("/report/listenerAudioId").asText()).isEqualTo(listenerId);
+        assertThat(report.at("/issues/0/listenerConfirmed").asBoolean()).isTrue();
+        assertThat(database.queryForObject("SELECT COUNT(*) FROM round_comparisons WHERE round_id = ?",
+                Integer.class, fixture.roundId())).isEqualTo(1);
+    }
+
+    @Test void expiredComparisonReturnsRoomToWaitingWithoutProducingAReport() throws Exception {
+        var fixture = recordingRoom();
+        var speaker = uploadForProcessing(fixture, "speaker", fixture.speaker(), fixture.version(), true);
+        String path = fixture.path();
+        long version = speaker.at("/round/version").asLong();
+        assertThat(post(path + "/points/confirm", Map.of("expectedVersion", version, "points", java.util.List.of(
+                Map.of("category", "重点", "text", "周六先看望家人"))), fixture.speaker()).statusCode()).isEqualTo(200);
+        var begun = body(post(path + "/restart-recording", Map.of("expectedVersion", version + 1, "kind", "listener"),
+                fixture.listener()));
+        var listener = uploadForProcessing(fixture, "listener", fixture.listener(), begun.get("version").asLong(), true);
+        assertThat(get(path + "/comparison", fixture.speaker()).statusCode()).isEqualTo(409);
+        String listenerId = listener.get("audioId").asText();
+        makeJobDue(listenerId);
+        var late = queue.claim();
+        assertThat(late.audioId()).isEqualTo(listenerId);
+        database.update("UPDATE rounds SET deadline_at = TIMESTAMPADD(SECOND, -1, CURRENT_TIMESTAMP(6)) WHERE id = ?",
+                fixture.roundId());
+        assertThat(queue.complete(late, "到期后返回的复述转写")).isFalse();
+        org.awaitility.Awaitility.await().atMost(Duration.ofSeconds(8)).untilAsserted(() -> {
+            var snapshot = body(get(fixture.room(), fixture.speaker()));
+            assertThat(snapshot.get("status").asText()).isEqualTo("WAITING");
+            assertThat(snapshot.get("terminalReason").asText()).isEqualTo("COMPARISON_FAILED");
+            assertThat(snapshot.get("deadlineAt").isNull()).isTrue();
+            assertThat(snapshot.at("/you/ready").asBoolean()).isFalse();
+        });
+        assertThat(database.queryForObject("SELECT COUNT(*) FROM round_comparisons WHERE round_id = ?",
+                Integer.class, fixture.roundId())).isZero();
+        assertThat(database.queryForObject("SELECT COUNT(*) FROM transcription_jobs WHERE round_id = ? AND status = 'CANCELLED'",
+                Integer.class, fixture.roundId())).isEqualTo(2);
     }
 
     @Test void reclaimedJobDiscardsExpiredWorkerResultAndClosedRoomResult() throws Exception {

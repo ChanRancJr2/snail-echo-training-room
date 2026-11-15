@@ -4,6 +4,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
@@ -17,10 +18,12 @@ import static io.snailecho.ApiFailure.invalid;
 @Transactional(isolation = Isolation.READ_COMMITTED)
 public class RoomService {
     private final RoomMapper database;
+    private final Optional<ComparisonService> comparisons;
     private final BCryptPasswordEncoder passwordEncoder = new BCryptPasswordEncoder(12);
 
-    RoomService(RoomMapper database) {
+    RoomService(RoomMapper database, Optional<ComparisonService> comparisons) {
         this.database = database;
+        this.comparisons = comparisons;
     }
 
     record CreateResult(State state, String inviteToken) {}
@@ -31,7 +34,7 @@ public class RoomService {
     record State(String id, String mode, String status, int durationSeconds, String retellStyle,
                  String topic, long version, String roundId, String stage, Instant deadlineAt,
                  Long roundVersion, String activeSeat, String speakerAudioId, String listenerAudioId,
-                 You you, List<Participant> members) {}
+                 You you, List<Participant> members, String terminalReason, ComparisonService.Practice previousPractice) {}
 
     public CreateResult create(String actor, String key, int seconds, String style, String topic) {
         // Lock the owning session once, so concurrent retries see the first committed room.
@@ -241,12 +244,19 @@ public class RoomService {
         var me = member(members, actor);
         if ("CLOSED".equals(room.status())) throw new ApiFailure(404, "ROOM_CLOSED");
         var round = database.latestRound(room.id());
+        boolean archived = round != null && "ARCHIVED".equals(round.stage());
+        if (archived && !actor.equals(round.speakerSessionId()) && !actor.equals(round.listenerSessionId())) {
+            round = null;
+        }
+        var previousPractice = round != null && "TASK".equals(round.stage()) && "speaker".equals(me.role())
+                ? comparisons.map(service -> service.previousPractice(room.id(), actor)).orElse(null) : null;
         var participants = members.stream().map(m -> new Participant(m.id(), m.nickname(), m.role(), m.ready())).toList();
         return new State(room.id(), "sync", room.status(), room.durationSeconds(), room.retellStyle(), room.topic(),
                 room.version(), round == null ? null : round.id(), round == null ? null : round.stage(),
                 round == null ? null : round.deadlineAt(), round == null ? null : round.version(),
-                null, round == null ? null : round.speakerAudioId(), round == null ? null : round.listenerAudioId(),
-                new You(me.id(), me.role(), me.ready(), actor.equals(room.ownerId())), participants);
+                null, round == null || archived ? null : round.speakerAudioId(), round == null || archived ? null : round.listenerAudioId(),
+                new You(me.id(), me.role(), me.ready(), actor.equals(room.ownerId())), participants,
+                round == null ? null : round.terminalReason(), previousPractice);
     }
 
     private RoomMapper.Room lockRoom(String roomId) {

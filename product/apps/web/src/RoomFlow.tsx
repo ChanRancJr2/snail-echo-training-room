@@ -277,7 +277,9 @@ export function RoomFlow({ mode, onRoomChange }: { mode: string | null; onRoomCh
           }} />
         </>}
         {room.stage === 'LISTENER_RETELL' && roundRole === 'speaker' && <p role="status">等待复述者提交录音。</p>}
-        {['SPEAKER_LABELING', 'MUTUAL_CONFIRM', 'ADVICE', 'ARCHIVED'].includes(room.stage ?? '') && <ComparisonView key={room.roundId} roundId={room.roundId} stage={room.stage!} version={room.roundVersion} role={roundRole ?? room.you.role} solo={sameDevice} labeling={labeling} onLabeling={() => setLabelingRound(room.roundId)} onChanged={() => refresh(room.id)} />}
+        {['SPEAKER_LABELING', 'MUTUAL_CONFIRM', 'ADVICE', 'ARCHIVED'].includes(room.stage ?? '') &&
+          (room.stage !== 'ARCHIVED' || roundRole !== 'observer') &&
+          <ComparisonView key={room.roundId} roundId={room.roundId} stage={room.stage!} version={room.roundVersion} role={roundRole ?? room.you.role} solo={sameDevice} labeling={labeling} onLabeling={() => setLabelingRound(room.roundId)} onChanged={() => refresh(room.id)} />}
         {room.stage === 'ADVICE' && room.you.role === 'speaker' && <button className="primary" disabled={busy} onClick={prepareNext}>归档本轮并查看报告</button>}
         {room.stage === 'ARCHIVED' && <button className="primary" onClick={() => setReportDismissed(room.roundId)}>返回训练室，准备下一轮</button>}
         {room.stage === 'ARCHIVED' && room.mode === 'sync' && ownsRoom && room.members.some(member => member.role === 'listener') &&

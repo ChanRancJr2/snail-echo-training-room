@@ -11,7 +11,8 @@ interface RoomMapper {
     record Member(String id, String sessionId, String nickname, String role, boolean ready, String invitationId) {}
     record Invite(String id, String roomId, String role, String passwordHash, Instant expiresAt, int maxUses, int useCount) {}
     record Round(String id, int sequenceNo, String stage, Instant deadlineAt, long version,
-                 String speakerSessionId, String listenerSessionId, String speakerAudioId, String listenerAudioId) {}
+                 String speakerSessionId, String listenerSessionId, String speakerAudioId, String listenerAudioId,
+                 String terminalReason) {}
     record DueRecording(String id, String roomId, long version) {}
 
     String RECORDING_GRACE_CUTOFF = "TIMESTAMPADD(SECOND, -30, CURRENT_TIMESTAMP(6))";
@@ -27,7 +28,7 @@ interface RoomMapper {
 
     String ROOM_COLUMNS = "id, owner_id, status, duration_seconds, retell_style, topic, version";
     String ROUND_COLUMNS = "id, sequence_no, stage, deadline_at, version, speaker_session_id, listener_session_id, "
-            + "speaker_audio_id, listener_audio_id";
+            + "speaker_audio_id, listener_audio_id, terminal_reason";
 
     @Select("SELECT " + ROOM_COLUMNS + " FROM rooms WHERE id = #{id}")
     Room room(String id);

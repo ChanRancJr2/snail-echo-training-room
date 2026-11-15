@@ -1,6 +1,6 @@
 # Java API 本地开发
 
-当前 Java 切片支持双人同步练的匿名会话、邀请、准备、开局、录音计时、签名直传、Mock 转写、确认重点、授权播放和复述提交。同一房间可在归档后换席、重新准备。真实转写、生成对照及其他练法仍待接入，完整体验使用 Node.js 版。
+Java 版支持双人同步练，涵盖匿名会话、邀请、录音直传、Mock 转写与对照、双方逐条确认、观察者建议、归档和报告导出。表达者归档后，双方重新准备即可在同一房间开始新一轮，也可以先交换角色。真实转写、语义对照及其他练法仍由 Node.js 版提供。
 
 ## 启动与验证
 
@@ -27,7 +27,7 @@ npm run dev:web
 
 `mvn -f server-java/pom.xml verify` 使用 Testcontainers 启动独立 MySQL 8.4 和 SeaweedFS，覆盖 HTTP、数据库事务和实际对象存储。Java API 和开发依赖端口仅监听本机。
 
-两个服务启动后，在 `product/` 下运行 `node tests/java-lobby.browser.mjs`，可用三个独立浏览器会话复现邀请、准备、开局、录音计时、重录、关房和换人建房。测试使用模拟麦克风。真实 MySQL 集成测试使用一个已到建议阶段的夹具验证同房第二轮。Windows 默认使用 Edge，其余环境先执行 `npx playwright install chromium`。
+两个服务启动后，在 `product/` 下运行 `node tests/java-lobby.browser.mjs`，可用三个独立浏览器会话复现邀请、准备、开局、录音计时、重录、关房和换人建房。测试使用模拟麦克风。Windows 默认使用 Edge，其余环境先执行 `npx playwright install chromium`。
 
 ## 本地录音上传
 
@@ -62,4 +62,6 @@ $env:JAVA_TEXT_MASTER_KEY = [Convert]::ToBase64String([Security.Cryptography.Ran
 
 上传确认事务会为每份录音登记一个转写任务。Worker 领取租约，成功后保存加密文本。已过期的租约和已关闭房间的晚到结果均不会写入文本。最多尝试三次。Mock 不对真实录音做识别，界面会将其标为演示转写。失败时表达者仍可手动确认要点。
 
-在 `product/` 下设置 `$env:ECHO_JAVA_TEST_PROCESSING = '1'` 后运行 `node tests/java-lobby.browser.mjs`，验证表达录音 → Mock 转写 → 人工确认重点 → 复述者播放和录音 → 复述提交。流程目前停在 `COMPARING`，等待后续对照处理。
+本地对照使用预置转写和文字匹配。对照结果、双方标注和澄清加密保存。复述转写失败或超过生成期限时，房间会回到待准备状态。确认只能由该轮的表达者和复述者分别提交，修改结论或澄清会清除该条原有的双方确认。
+
+在 `product/` 下设置 `$env:ECHO_JAVA_TEST_PROCESSING = '1'` 后运行 `node tests/java-lobby.browser.mjs`，可经同一个 H5 地址验证从录音上传到双方确认、匿名报告导出和同房再开一轮的完整流程。
