@@ -55,14 +55,20 @@ export async function createApp(deps: AppDependencies) {
     return { status: 'ok' };
   });
 
+  const sessionView = (session: { id: string; nickname: string; expiresAt: Date }, handoff?: { roomId: string } | null) =>
+    ({ id: session.id, nickname: session.nickname, expiresAt: session.expiresAt.toISOString(), ...(handoff ? { handoffRoomId: handoff.roomId } : {}) });
+
   app.post('/api/sessions/anonymous', { config: { rateLimit: { max: 12, timeWindow: '1 minute' } } }, async (request, reply) => {
     const current = await findSession(deps.sessions, request.headers.cookie, currentTime());
-    if (current && await deps.rooms?.childHandoff(current.id)) return reply.code(403).send({ error: 'GUARDIAN_REQUIRED' });
     const parsed = sessionBody.safeParse(request.body ?? {});
     if (!parsed.success) return reply.code(400).send({ error: 'INVALID_INPUT' });
+    const handoff = current ? await deps.rooms?.childHandoff(current.id) : null;
+    reply.header('Cache-Control', 'no-store');
+    if (current && parsed.data.nickname === undefined) return sessionView(current, handoff);
+    if (handoff) return reply.code(403).send({ error: 'GUARDIAN_REQUIRED' });
     const { session, token } = await createAnonymousSession(deps.sessions, parsed.data.nickname ?? '访客', currentTime());
     reply.header('Set-Cookie', sessionCookie(token, deps.production));
-    return { id: session.id, nickname: session.nickname, expiresAt: session.expiresAt.toISOString() };
+    return sessionView(session);
   });
 
   app.get('/api/me', async (request, reply) => {
@@ -70,7 +76,7 @@ export async function createApp(deps: AppDependencies) {
     if (!session) return reply.code(401).send({ error: 'UNAUTHENTICATED' });
     const handoff = await deps.rooms?.childHandoff(session.id);
     reply.header('Cache-Control', 'no-store');
-    return { id: session.id, nickname: session.nickname, expiresAt: session.expiresAt.toISOString(), ...(handoff ? { handoffRoomId: handoff.roomId } : {}) };
+    return sessionView(session, handoff);
   });
 
   app.post('/api/sessions/logout', async (request, reply) => {

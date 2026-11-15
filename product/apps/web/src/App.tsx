@@ -8,12 +8,9 @@ interface Session { id: string; nickname: string; expiresAt: string; handoffRoom
 let sessionRequest: Promise<Session> | null = null;
 
 async function readOrCreateSession(): Promise<Session> {
-  let response = await fetch('/api/me', { credentials: 'same-origin' });
-  if (response.status === 401) {
-    response = await fetch('/api/sessions/anonymous', {
-      method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: '{}',
-    });
-  }
+  const response = await fetch('/api/sessions/anonymous', {
+    method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: '{}',
+  });
   if (!response.ok) throw new Error('暂时无法建立会话，请检查网络后重试。');
   return response.json() as Promise<Session>;
 }

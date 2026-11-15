@@ -33,6 +33,9 @@ test('anonymous session uses an opaque HttpOnly cookie and ignores forged IDs', 
     assert.equal(me.statusCode, 200);
     assert.equal(me.json().nickname, '小禾');
     assert.equal(me.json().id, created.json().id);
+    const reopened = await app.inject({ method: 'POST', url: '/api/sessions/anonymous', headers: { cookie, origin }, payload: {} });
+    assert.deepEqual(reopened.json(), created.json());
+    assert.equal(reopened.headers['set-cookie'], undefined);
     const loggedOut = await app.inject({ method: 'POST', url: '/api/sessions/logout', headers: { cookie, origin } });
     assert.equal(loggedOut.statusCode, 200);
     assert.equal((await app.inject({ method: 'GET', url: '/api/me', headers: { cookie } })).statusCode, 401);
