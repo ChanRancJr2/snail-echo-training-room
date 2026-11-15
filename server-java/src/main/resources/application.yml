@@ -27,3 +27,11 @@ mybatis:
     local-cache-scope: STATEMENT
 echo:
   origin: ${JAVA_PUBLIC_ORIGIN:http://localhost:3100}
+  storage:
+    enabled: ${JAVA_STORAGE_ENABLED:false}
+    endpoint: ${JAVA_STORAGE_ENDPOINT:}
+    public-endpoint: ${JAVA_STORAGE_PUBLIC_ENDPOINT:}
+    region: ${JAVA_STORAGE_REGION:us-east-1}
+    bucket: ${JAVA_STORAGE_BUCKET:}
+    access-key: ${JAVA_STORAGE_ACCESS_KEY:}
+    secret-key: ${JAVA_STORAGE_SECRET_KEY:}

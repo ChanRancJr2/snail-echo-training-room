@@ -11,11 +11,18 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.testcontainers.containers.MySQLContainer;
+import org.testcontainers.containers.GenericContainer;
+import org.testcontainers.containers.wait.strategy.Wait;
+import org.testcontainers.lifecycle.Startables;
+import org.testcontainers.utility.DockerImageName;
 
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Map;
@@ -31,16 +38,29 @@ class RoomFlowTest {
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final HttpClient HTTP = HttpClient.newHttpClient();
     private static final MySQLContainer<?> DATABASE = new MySQLContainer<>("mysql:8.4");
+    private static final GenericContainer<?> STORAGE = new GenericContainer<>(DockerImageName.parse(
+            "chrislusf/seaweedfs@sha256:c2658820e763294a9e9de7b36c81e59b879e3459148351aee4e31a126ca64860"))
+            .withCommand("mini", "-dir=/data")
+            .withEnv("AWS_ACCESS_KEY_ID", "dev_echo_access")
+            .withEnv("AWS_SECRET_ACCESS_KEY", "dev_echo_secret_only")
+            .withEnv("S3_BUCKET", "echo-private")
+            .withExposedPorts(8333)
+            .waitingFor(Wait.forListeningPort());
     @LocalServerPort int port;
     @Autowired JdbcTemplate database;
     @Autowired RoundExpiry expiry;
 
-    @BeforeAll static void database() { DATABASE.start(); }
+    @BeforeAll static void dependencies() { Startables.deepStart(DATABASE, STORAGE).join(); }
 
     @DynamicPropertySource static void settings(DynamicPropertyRegistry registry) {
         registry.add("spring.datasource.url", DATABASE::getJdbcUrl);
         registry.add("spring.datasource.username", DATABASE::getUsername);
         registry.add("spring.datasource.password", DATABASE::getPassword);
+        registry.add("echo.storage.enabled", () -> true);
+        registry.add("echo.storage.endpoint", () -> "http://" + STORAGE.getHost() + ":" + STORAGE.getMappedPort(8333));
+        registry.add("echo.storage.bucket", () -> "echo-private");
+        registry.add("echo.storage.access-key", () -> "dev_echo_access");
+        registry.add("echo.storage.secret-key", () -> "dev_echo_secret_only");
     }
 
     @Test void onlyOneRoundStartsAfterBothParticipantsAreReady() throws Exception {
@@ -232,6 +252,145 @@ class RoomFlowTest {
         assertThat(database.queryForObject("SELECT version FROM rounds WHERE id = ?", Long.class, round)).isEqualTo(version + 2);
         assertThat(database.queryForObject("SELECT status FROM rooms WHERE id = ?", String.class, id)).isEqualTo("WAITING");
         assertThat(post(room + "/start", Map.of(), host).statusCode()).isEqualTo(409);
+    }
+
+    @Test void signedUploadSurvivesRetriesAndStagingOverwrite() throws Exception {
+        var fixture = recordingRoom();
+        byte[] original = sampleWave((short) 100);
+        byte[] replacement = sampleWave((short) 200);
+        String route = fixture.path() + "/uploads";
+        String key = UUID.randomUUID().toString();
+        var request = Map.of("kind", "speaker", "mimeType", "audio/wav", "byteSize", original.length, "idempotencyKey", key);
+        assertThat(post(route, request, fixture.listener()).statusCode()).isEqualTo(403);
+        var response = post(route, request, fixture.speaker());
+        assertThat(response.statusCode()).isEqualTo(200);
+        var requested = body(response);
+        String id = requested.get("audioId").asText();
+        assertThat(body(post(route, request, fixture.speaker())).get("audioId").asText()).isEqualTo(id);
+        assertThat(post(route, Map.of("kind", "speaker", "mimeType", "audio/wav", "byteSize", original.length + 1,
+                "idempotencyKey", key), fixture.speaker()).statusCode()).isEqualTo(409);
+        String putUrl = requested.get("uploadUrl").asText();
+        String confirm = route + "/" + id + "/commit";
+        var commit = Map.of("expectedVersion", fixture.version(), "transcribe", true);
+        assertThat(post(confirm, commit, fixture.listener()).statusCode()).isEqualTo(403);
+        assertThat(post(confirm, commit, fixture.speaker()).statusCode()).isEqualTo(409);
+        assertThat(putAudio(putUrl, "audio/wav", new byte[original.length])).isBetween(200, 299);
+        var badAudio = post(confirm, commit, fixture.speaker());
+        assertThat(badAudio.statusCode()).isEqualTo(400);
+        assertThat(body(badAudio).get("error").asText()).isEqualTo("UNSUPPORTED_AUDIO");
+        assertThat(putAudio(putUrl, "audio/wav", original)).isBetween(200, 299);
+        var second = body(post(route, Map.of("kind", "speaker", "mimeType", "audio/wav", "byteSize", original.length,
+                "idempotencyKey", UUID.randomUUID()), fixture.speaker()));
+        String secondId = second.get("audioId").asText();
+        assertThat(putAudio(second.get("uploadUrl").asText(), "audio/wav", original)).isBetween(200, 299);
+
+        String winner;
+        try (var threads = Executors.newVirtualThreadPerTaskExecutor()) {
+            var first = threads.submit(() -> post(confirm, commit, fixture.speaker()));
+            var other = threads.submit(() -> post(route + "/" + secondId + "/commit", commit, fixture.speaker()));
+            assertThat(first.get().statusCode()).isEqualTo(200);
+            assertThat(other.get().statusCode()).isEqualTo(200);
+            winner = body(first.get()).get("audioId").asText();
+            assertThat(body(other.get()).get("audioId").asText()).isEqualTo(winner);
+            assertThat(body(first.get()).at("/round/stage").asText()).isEqualTo("KEYPOINT_CONFIRM");
+        }
+        assertThat(putAudio(putUrl, "audio/wav", replacement)).isBetween(200, 299);
+        assertThat(putAudio(second.get("uploadUrl").asText(), "audio/wav", replacement)).isBetween(200, 299);
+        String access = fixture.path() + "/audio/" + winner + "/access";
+        assertThat(get(access, fixture.listener()).statusCode()).isEqualTo(403);
+        assertThat(get(access, session()).statusCode()).isEqualTo(403);
+        var allowed = get(access, fixture.speaker());
+        assertThat(allowed.statusCode()).isEqualTo(200);
+        assertThat(allowed.headers().firstValue("cache-control")).contains("no-store");
+        var recordedAudio = HTTP.send(HttpRequest.newBuilder(URI.create(body(allowed).get("url").asText()))
+                .timeout(Duration.ofSeconds(10)).GET().build(), HttpResponse.BodyHandlers.ofByteArray());
+        assertThat(recordedAudio.statusCode()).isEqualTo(200);
+        assertThat(recordedAudio.body()).isEqualTo(original);
+        assertThat(body(get(fixture.room(), fixture.speaker())).get("speakerAudioId").asText()).isEqualTo(winner);
+        assertThat(database.queryForObject("SELECT COUNT(*) FROM audio_assets WHERE round_id = ? AND object_key IS NOT NULL",
+                Integer.class, fixture.roundId())).isEqualTo(1);
+        database.update("UPDATE rounds SET stage = 'LISTENER_RETELL', deadline_at = NULL WHERE id = ?", fixture.roundId());
+        assertThat(get(access, fixture.listener()).statusCode()).isEqualTo(200);
+    }
+
+    @Test void listenerUploadRequiresConsentAndOldSpeakerDraftIsRejectedAfterRestart() throws Exception {
+        var fixture = recordingRoom();
+        byte[] audio = sampleWave((short) 100);
+        String route = fixture.path() + "/uploads";
+        var draft = body(post(route, Map.of("kind", "speaker", "mimeType", "audio/wav", "byteSize", audio.length,
+                "idempotencyKey", UUID.randomUUID()), fixture.speaker()));
+        assertThat(putAudio(draft.get("uploadUrl").asText(), "audio/wav", audio)).isBetween(200, 299);
+        assertThat(post(fixture.path() + "/restart-recording", Map.of("expectedVersion", fixture.version(), "kind", "speaker"),
+                fixture.speaker()).statusCode()).isEqualTo(200);
+        var stale = post(route + "/" + draft.get("audioId").asText() + "/commit", Map.of("expectedVersion", fixture.version()), fixture.speaker());
+        assertThat(stale.statusCode()).isEqualTo(409);
+        assertThat(body(stale).get("error").asText()).isEqualTo("STALE_AUDIO");
+
+        // Points confirmation is a later slice. Establish the state at its boundary.
+        database.update("UPDATE rounds SET stage = 'LISTENER_RETELL', deadline_at = NULL, version = version + 1 WHERE id = ?",
+                fixture.roundId());
+        var listenerUpload = Map.of("kind", "listener", "mimeType", "audio/wav", "byteSize", audio.length,
+                "idempotencyKey", UUID.randomUUID());
+        assertThat(body(post(route, listenerUpload, fixture.listener())).get("error").asText())
+                .isEqualTo("RECORDING_WINDOW_CLOSED");
+        var listenerStart = post(fixture.path() + "/restart-recording",
+                Map.of("expectedVersion", fixture.version() + 2, "kind", "listener"), fixture.listener());
+        assertThat(listenerStart.statusCode()).isEqualTo(200);
+        var recording = body(listenerStart);
+        assertThat(recording.get("stage").asText()).isEqualTo("LISTENER_RETELL");
+        assertThat(Instant.parse(recording.get("deadlineAt").asText())).isAfter(Instant.now().plusSeconds(25));
+        long version = recording.get("version").asLong();
+        var requested = post(route, listenerUpload, fixture.listener());
+        assertThat(requested.statusCode()).isEqualTo(200);
+        var listener = body(requested);
+        assertThat(putAudio(listener.get("uploadUrl").asText(), "audio/wav", audio)).isBetween(200, 299);
+        String confirm = route + "/" + listener.get("audioId").asText() + "/commit";
+        assertThat(body(post(confirm, Map.of("expectedVersion", version), fixture.listener())).get("error").asText())
+                .isEqualTo("CONSENT_REQUIRED");
+        var result = post(confirm, Map.of("expectedVersion", version, "consentToTranscribe", true), fixture.listener());
+        assertThat(result.statusCode()).isEqualTo(200);
+        assertThat(body(result).at("/round/stage").asText()).isEqualTo("COMPARING");
+    }
+
+    private record RecordingFixture(String room, String roundId, String speaker, String listener, long version) {
+        String path() { return "/api/rounds/" + roundId; }
+    }
+
+    private RecordingFixture recordingRoom() throws Exception {
+        String speaker = session();
+        String listener = session();
+        var created = body(post("/api/rooms", Map.of("mode", "sync", "createKey", UUID.randomUUID()), speaker));
+        String room = "/api/rooms/" + created.at("/state/id").asText();
+        assertThat(post("/api/rooms/join", Map.of("token", created.get("inviteToken").asText()), listener).statusCode()).isEqualTo(200);
+        assertThat(post(room + "/ready", Map.of("ready", true), speaker).statusCode()).isEqualTo(200);
+        assertThat(post(room + "/ready", Map.of("ready", true), listener).statusCode()).isEqualTo(200);
+        var started = body(post(room + "/start", Map.of(), speaker));
+        String roundId = started.get("roundId").asText();
+        var recording = post("/api/rounds/" + roundId + "/task", Map.of("expectedVersion", started.get("roundVersion").asLong()), speaker);
+        assertThat(recording.statusCode()).isEqualTo(200);
+        return new RecordingFixture(room, roundId, speaker, listener, body(recording).get("version").asLong());
+    }
+
+    private static byte[] sampleWave(short sample) {
+        int size = 320;
+        var wave = ByteBuffer.allocate(44 + size).order(ByteOrder.LITTLE_ENDIAN);
+        wave.put("RIFF".getBytes(StandardCharsets.US_ASCII)).putInt(size + 36);
+        wave.put("WAVEfmt ".getBytes(StandardCharsets.US_ASCII)).putInt(16).putShort((short) 1).putShort((short) 1);
+        wave.putInt(16000).putInt(32000).putShort((short) 2).putShort((short) 16);
+        wave.put("data".getBytes(StandardCharsets.US_ASCII)).putInt(size);
+        while (wave.hasRemaining()) wave.putShort(sample);
+        return wave.array();
+    }
+
+    private int putAudio(String url, String mime, byte[] bytes) throws Exception {
+        return HTTP.send(HttpRequest.newBuilder(URI.create(url)).timeout(Duration.ofSeconds(10))
+                .header("Content-Type", mime).PUT(HttpRequest.BodyPublishers.ofByteArray(bytes)).build(),
+                HttpResponse.BodyHandlers.discarding()).statusCode();
+    }
+
+    private HttpResponse<String> get(String path, String cookie) throws Exception {
+        return HTTP.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + path)).timeout(Duration.ofSeconds(10))
+                .header("Cookie", cookie).GET().build(), HttpResponse.BodyHandlers.ofString());
     }
 
     private String session() throws Exception {

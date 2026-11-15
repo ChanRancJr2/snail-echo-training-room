@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { chromium } from 'playwright';
 
 const origin = process.env.ECHO_PRODUCT_ORIGIN ?? 'http://localhost:3100';
+const verifyUpload = process.env.ECHO_JAVA_TEST_UPLOAD === '1';
 const executablePath = process.env.BROWSER_EXECUTABLE ??
   (process.platform === 'win32' ? 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe' : undefined);
 const browser = await chromium.launch({
@@ -70,6 +71,27 @@ try {
     const restarted = await (await restarting).json();
     assert.equal(restarted.version, recording.version + 1);
     assert.ok(Date.parse(restarted.deadlineAt) > Date.parse(recording.deadlineAt));
+    if (verifyUpload) {
+      await host.locator('.record-time').getByText('00:01', { exact: true }).waitFor();
+      await host.getByRole('button', { name: '结束录音' }).click();
+      const confirm = host.waitForResponse(response => response.url().endsWith('/commit'));
+      const upload = host.waitForResponse(response => response.request().method() === 'PUT');
+      await host.getByRole('button', { name: '确认上传' }).click();
+      assert.ok((await upload).ok(), 'cross-origin storage upload failed');
+      const confirmed = await confirm;
+      assert.equal(confirmed.status(), 200);
+      const { audioId, round } = await confirmed.json();
+      assert.equal(round.stage, 'KEYPOINT_CONFIRM');
+      await host.getByRole('heading', { name: '本轮信息点' }).waitFor();
+      const access = `${origin}/api/rounds/${snapshot.roundId}/audio/${audioId}/access`;
+      assert.equal((await guest.request.get(access)).status(), 403);
+      const audio = await host.request.get(access);
+      assert.equal(audio.status(), 200);
+      const { url } = await audio.json();
+      const playback = await host.request.get(url, { headers: { Range: 'bytes=0-15' } });
+      assert.equal(playback.status(), 206);
+      assert.equal((await playback.body()).length, 16);
+    }
     await host.getByRole('button', { name: '结束并关闭训练室' }).click();
     await guest.getByText('训练室已关闭或会话已失效').waitFor();
     return snapshot;
@@ -80,6 +102,7 @@ try {
   assert.notEqual(first.id, second.id);
   assert.notEqual(first.roundId, second.roundId);
   console.log('Three Java browser sessions passed: startup, reload, recording, re-recording and reversed roles in a fresh room.');
+  if (verifyUpload) console.log('Both browser recordings reached confirmed storage and authorized range playback.');
 } finally {
   await browser.close();
 }

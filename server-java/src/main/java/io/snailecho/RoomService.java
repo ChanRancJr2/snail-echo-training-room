@@ -30,7 +30,8 @@ public class RoomService {
     record RecordingState(String stage, Instant deadlineAt, long version) {}
     record State(String id, String mode, String status, int durationSeconds, String retellStyle,
                  String topic, long version, String roundId, String stage, Instant deadlineAt,
-                 Long roundVersion, String activeSeat, You you, List<Participant> members) {}
+                 Long roundVersion, String activeSeat, String speakerAudioId, String listenerAudioId,
+                 You you, List<Participant> members) {}
 
     public CreateResult create(String actor, String key, int seconds, String style, String topic) {
         // Lock the owning session once, so concurrent retries see the first committed room.
@@ -134,7 +135,7 @@ public class RoomService {
     }
 
     public RecordingState beginRecording(String roundId, String actor, long expectedVersion, String focus) {
-        var room = lockRecordingRoom(roundId, actor);
+        var room = lockRecordingRoom(roundId, actor, "speaker");
         if (database.beginRecording(roundId, expectedVersion, room.durationSeconds(), focus) != 1) {
             throw new ApiFailure(409, "STALE_VERSION");
         }
@@ -142,15 +143,14 @@ public class RoomService {
     }
 
     public RecordingState restartRecording(String roundId, String actor, long expectedVersion, String kind) {
-        var room = lockRecordingRoom(roundId, actor);
-        if (!"speaker".equals(kind)) throw new ApiFailure(409, "WRONG_STAGE");
-        if (database.restartRecording(roundId, expectedVersion, room.durationSeconds()) != 1) {
+        var room = lockRecordingRoom(roundId, actor, kind);
+        if (database.restartRecording(roundId, expectedVersion, room.durationSeconds(), kind) != 1) {
             throw new ApiFailure(409, "STALE_VERSION");
         }
         return recordingState(room.id());
     }
 
-    private RoomMapper.Room lockRecordingRoom(String roundId, String actor) {
+    private RoomMapper.Room lockRecordingRoom(String roundId, String actor, String kind) {
         String roomId = database.roundRoom(roundId);
         if (roomId == null) throw new ApiFailure(404, "ROUND_NOT_FOUND");
         var room = lockRoom(roomId);
@@ -159,7 +159,8 @@ public class RoomService {
         if (!"ACTIVE".equals(room.status()) || latest == null || !roundId.equals(latest.id())) {
             throw new ApiFailure(409, "STALE_VERSION");
         }
-        if (!actor.equals(latest.speakerSessionId())) throw new ApiFailure(403, "FORBIDDEN_ROLE");
+        String seat = "speaker".equals(kind) ? latest.speakerSessionId() : latest.listenerSessionId();
+        if (!actor.equals(seat)) throw new ApiFailure(403, "FORBIDDEN_ROLE");
         return room;
     }
 
@@ -244,7 +245,8 @@ public class RoomService {
         return new State(room.id(), "sync", room.status(), room.durationSeconds(), room.retellStyle(), room.topic(),
                 room.version(), round == null ? null : round.id(), round == null ? null : round.stage(),
                 round == null ? null : round.deadlineAt(), round == null ? null : round.version(),
-                null, new You(me.id(), me.role(), me.ready(), actor.equals(room.ownerId())), participants);
+                null, round == null ? null : round.speakerAudioId(), round == null ? null : round.listenerAudioId(),
+                new You(me.id(), me.role(), me.ready(), actor.equals(room.ownerId())), participants);
     }
 
     private RoomMapper.Room lockRoom(String roomId) {

@@ -11,7 +11,7 @@ interface RoomMapper {
     record Member(String id, String sessionId, String nickname, String role, boolean ready, String invitationId) {}
     record Invite(String id, String roomId, String role, String passwordHash, Instant expiresAt, int maxUses, int useCount) {}
     record Round(String id, int sequenceNo, String stage, Instant deadlineAt, long version,
-                 String speakerSessionId, String listenerSessionId) {}
+                 String speakerSessionId, String listenerSessionId, String speakerAudioId, String listenerAudioId) {}
     record DueRecording(String id, String roomId, long version) {}
 
     String RECORDING_GRACE_CUTOFF = "TIMESTAMPADD(SECOND, -30, CURRENT_TIMESTAMP(6))";
@@ -26,6 +26,8 @@ interface RoomMapper {
     String lockSession(String id);
 
     String ROOM_COLUMNS = "id, owner_id, status, duration_seconds, retell_style, topic, version";
+    String ROUND_COLUMNS = "id, sequence_no, stage, deadline_at, version, speaker_session_id, listener_session_id, "
+            + "speaker_audio_id, listener_audio_id";
 
     @Select("SELECT " + ROOM_COLUMNS + " FROM rooms WHERE id = #{id}")
     Room room(String id);
@@ -92,10 +94,7 @@ interface RoomMapper {
     @Update("UPDATE invitations SET use_count = use_count + 1 WHERE id = #{id}")
     void consumeInvite(String id);
 
-    @Select("""
-        SELECT id, sequence_no, stage, deadline_at, version, speaker_session_id, listener_session_id
-        FROM rounds WHERE room_id = #{id} ORDER BY sequence_no DESC LIMIT 1
-        """)
+    @Select("SELECT " + ROUND_COLUMNS + " FROM rounds WHERE room_id = #{id} ORDER BY sequence_no DESC LIMIT 1")
     Round latestRound(String id);
 
     @Insert("""
@@ -118,18 +117,22 @@ interface RoomMapper {
 
     @Update("""
         UPDATE rounds SET deadline_at = TIMESTAMPADD(SECOND, #{seconds}, CURRENT_TIMESTAMP(6)), version = version + 1
-        WHERE id = #{id} AND version = #{version} AND stage = 'SPEAKER_RECORDING' AND deadline_at >
-        """ + RECORDING_GRACE_CUTOFF)
-    int restartRecording(@Param("id") String id, @Param("version") long version, @Param("seconds") int seconds);
+        WHERE id = #{id} AND version = #{version}
+          AND ((#{kind} = 'speaker' AND stage = 'SPEAKER_RECORDING' AND speaker_audio_id IS NULL)
+            OR (#{kind} = 'listener' AND stage = 'LISTENER_RETELL' AND listener_audio_id IS NULL))
+          AND (deadline_at IS NULL OR deadline_at >
+        """ + RECORDING_GRACE_CUTOFF + ")")
+    int restartRecording(@Param("id") String id, @Param("version") long version, @Param("seconds") int seconds,
+                         @Param("kind") String kind);
 
     @Select("""
-        SELECT id, room_id, version FROM rounds WHERE stage = 'SPEAKER_RECORDING' AND deadline_at <=
+        SELECT id, room_id, version FROM rounds WHERE stage IN ('SPEAKER_RECORDING', 'LISTENER_RETELL') AND deadline_at <=
         """ + RECORDING_GRACE_CUTOFF + " ORDER BY deadline_at, id LIMIT 50")
     List<DueRecording> dueRecordings();
 
     @Update("""
         UPDATE rounds SET stage = 'CANCELLED', deadline_at = NULL, version = version + 1
-        WHERE id = #{id} AND version = #{version} AND stage = 'SPEAKER_RECORDING' AND deadline_at <=
+        WHERE id = #{id} AND version = #{version} AND stage IN ('SPEAKER_RECORDING', 'LISTENER_RETELL') AND deadline_at <=
         """ + RECORDING_GRACE_CUTOFF)
     int expireRecording(@Param("id") String id, @Param("version") long version);
 
