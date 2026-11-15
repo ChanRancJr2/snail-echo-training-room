@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { chromium } from 'playwright';
 
-const origin = 'http://127.0.0.1:3100';
+const origin = process.env.ECHO_PRODUCT_ORIGIN ?? 'http://127.0.0.1:3100';
 const executablePath = process.env.BROWSER_EXECUTABLE ?? (process.platform === 'win32' ? 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe' : undefined);
 const browser = await chromium.launch({ headless: true, executablePath, args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream'] });
 const errors = [];
@@ -156,6 +156,10 @@ try {
   assert.equal(await teen.evaluate(async id => (await fetch(`/api/rooms/${id}/leave`, { method: 'POST' })).status, childState.id), 403);
   await teen.goto(origin);
   await teen.waitForURL(`${origin}/?room=${childState.id}`);
+  const replaceSession = await teen.request.post(`${origin}/api/sessions/anonymous`, {
+    headers: { Origin: origin }, data: { nickname: '尝试切换身份' },
+  });
+  assert.equal(replaceSession.status(), 403);
   await express(teen);
   await teen.getByRole('heading', { name: '请把手机交还监护人' }).waitFor();
   await guardianReturn(teen);
