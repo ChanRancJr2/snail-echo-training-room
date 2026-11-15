@@ -1,5 +1,7 @@
 package io.snailecho;
 
+import org.springframework.beans.factory.annotation.Value;
+
 import java.util.UUID;
 
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -14,11 +16,15 @@ class AudioTransactions {
     private final RoomMapper rooms;
     private final AudioMapper audio;
     private final TranscriptionMapper jobs;
+    private final String provider;
 
-    AudioTransactions(RoomMapper rooms, AudioMapper audio, TranscriptionMapper jobs) {
+    AudioTransactions(RoomMapper rooms, AudioMapper audio, TranscriptionMapper jobs,
+                      @Value("${echo.processing.enabled:false}") boolean processing,
+                      @Value("${echo.processing.mode:}") String mode) {
         this.rooms = rooms;
         this.audio = audio;
         this.jobs = jobs;
+        this.provider = processing && "volc".equals(mode) ? "volc" : "mock";
     }
 
     record Confirmation(AudioMapper.Asset asset, RoomMapper.Round round) {}
@@ -56,7 +62,7 @@ class AudioTransactions {
                 ? audio.commitSpeaker(roundId, audioId, version)
                 : audio.commitListener(roundId, audioId, version);
         if (changed != 1 || audio.seal(audioId, objectKey) != 1) throw new ApiFailure(409, "STALE_AUDIO");
-        jobs.enqueue(audioId, roundId);
+        jobs.enqueue(audioId, roundId, provider);
         String roomId = rooms.roundRoom(roundId);
         rooms.advanceVersion(roomId);
         return new Confirmation(audio.byId(roundId, audioId), rooms.latestRound(roomId));

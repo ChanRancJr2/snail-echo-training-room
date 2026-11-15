@@ -47,7 +47,7 @@ class ComparisonService {
                     listenerConfirmed || "listener".equals(role), listenerNote, observerTag, observerNote);
         }
     }
-    record Review(List<Item> items, boolean adviceAccepted) {}
+    record Review(List<Item> items, boolean adviceAccepted, String provider) {}
     record Label(String issueId, String tag, String resolution) {}
     record Issue(String id, String category, String original, String speakerQuote, String listenerQuote,
                  boolean complete, boolean accurate, String tag, String clarification, String resolution,
@@ -92,7 +92,8 @@ class ComparisonService {
         var round = lockCandidate(candidate);
         if (round == null) return;
         // The candidate query makes pending jobs eligible only when the database deadline expires.
-        String listener = transcript(round.listenerAudioId());
+        var listenerJob = round.listenerAudioId() == null ? null : transcripts.byId(round.listenerAudioId());
+        String listener = transcript(listenerJob);
         var confirmed = points.list(round.id());
         if (listener == null || confirmed.isEmpty()) {
             cancelComparison(candidate.roomId(), round);
@@ -112,7 +113,8 @@ class ComparisonService {
                     listenerQuote != null && !match ? "这句是否保留了表达者确认的要点？" : null,
                     new Feedback(tag, null, false, false, null, null, null));
         }).toList();
-        comparisons.insert(round.id(), seal(round.id(), new Review(items, false)));
+        String provider = "volc".equals(listenerJob.provider()) ? "rules" : "mock";
+        comparisons.insert(round.id(), seal(round.id(), new Review(items, false, provider)));
         advance(round, "SPEAKER_LABELING");
         rooms.advanceVersion(candidate.roomId());
     }
@@ -180,7 +182,7 @@ class ComparisonService {
                     round.speakerAudioId(), round.listenerAudioId(), details.hintLevel());
         }
         return new View(items.size(), complete, accurate, items.stream().map(Issue::new).toList(),
-                review.adviceAccepted(), texts, report, "mock");
+                review.adviceAccepted(), texts, report, review.provider() == null ? "mock" : review.provider());
     }
 
     public Updated label(String id, String actor, long version, List<Label> labels) {
@@ -232,7 +234,7 @@ class ComparisonService {
         var access = edit(id, actor, version, "speaker", "ADVICE");
         var review = load(id);
         if (review.adviceAccepted()) return current(access.round());
-        return persist(access, new Review(review.items(), true), "ADVICE");
+        return persist(access, new Review(review.items(), true, review.provider()), "ADVICE");
     }
 
     private Updated changeIssue(Access access, String issueId, UnaryOperator<Feedback> change) {
@@ -248,7 +250,7 @@ class ComparisonService {
             var item = items.get(i);
             if (item.id().equals(issueId) && item.problem()) {
                 items.set(i, item.withFeedback(change.apply(item.feedback())));
-                return new Review(List.copyOf(items), review.adviceAccepted());
+                return new Review(List.copyOf(items), review.adviceAccepted(), review.provider());
             }
         }
         throw new ApiFailure(404, "ISSUE_NOT_FOUND");
@@ -322,10 +324,12 @@ class ComparisonService {
     }
 
     private String transcript(String audioId) {
-        if (audioId == null) return null;
-        var job = transcripts.byId(audioId);
+        return audioId == null ? null : transcript(transcripts.byId(audioId));
+    }
+
+    private String transcript(TranscriptionMapper.Job job) {
         return job != null && "DONE".equals(job.status())
-                ? vault.open("transcript:" + audioId, job.resultCiphertext()) : null;
+                ? vault.open("transcript:" + job.audioId(), job.resultCiphertext()) : null;
     }
 
     private static List<String> sentences(String text) {

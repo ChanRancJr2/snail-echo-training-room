@@ -24,6 +24,9 @@ interface AudioMapper {
     @Select("SELECT " + COLUMNS + " FROM audio_assets WHERE round_id = #{round} AND id = #{id}")
     Asset byId(@Param("round") String round, @Param("id") String id);
 
+    @Select("SELECT room.duration_seconds FROM rounds r JOIN rooms room ON room.id = r.room_id WHERE r.id = #{roundId}")
+    int durationSeconds(String roundId);
+
     @Select("SELECT " + COLUMNS + " FROM audio_assets WHERE round_id = #{round} AND committed_kind = #{kind}")
     Asset committed(@Param("round") String round, @Param("kind") String kind);
 

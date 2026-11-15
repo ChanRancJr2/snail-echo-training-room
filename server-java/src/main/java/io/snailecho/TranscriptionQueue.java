@@ -25,8 +25,8 @@ class TranscriptionQueue {
 
     record Lease(String audioId, String roundId, String token) {}
 
-    public Lease claim() {
-        var job = jobs.due();
+    public Lease claim(String provider) {
+        var job = jobs.due(provider);
         if (job == null) return null;
         if (job.attempts() >= 3) {
             jobs.exhausted(job.audioId());
@@ -52,6 +52,35 @@ class TranscriptionQueue {
 
     public boolean retry(Lease lease) {
         return jobs.retry(lease.audioId(), lease.token()) == 1;
+    }
+
+    public void fail(Lease lease) {
+        jobs.fail(lease.audioId(), lease.token());
+    }
+
+    public TranscriptionMapper.ProviderProgress progress(Lease lease) {
+        return jobs.progress(lease.audioId(), lease.token());
+    }
+
+    public boolean reserveArtifact(Lease lease) {
+        return jobs.reserveArtifact(lease.audioId(), lease.token()) == 1;
+    }
+
+    public boolean startProvider(Lease lease) {
+        if (!stillRelevant(lease)) return cancel(lease);
+        return jobs.startProvider(lease.audioId(), lease.token()) == 1;
+    }
+
+    public void defer(Lease lease, String taskId) {
+        if (!stillRelevant(lease)) {
+            cancel(lease);
+            return;
+        }
+        jobs.defer(lease.audioId(), lease.token(), taskId);
+    }
+
+    public int durationSeconds(Lease lease) {
+        return audio.durationSeconds(lease.roundId());
     }
 
     public AudioMapper.Asset source(Lease lease) {

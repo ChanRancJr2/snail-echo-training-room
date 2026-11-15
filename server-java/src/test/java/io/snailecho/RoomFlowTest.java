@@ -2,8 +2,11 @@ package io.snailecho;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.sun.net.httpserver.HttpExchange;
+import com.sun.net.httpserver.HttpServer;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
@@ -16,6 +19,8 @@ import org.testcontainers.containers.wait.strategy.Wait;
 import org.testcontainers.lifecycle.Startables;
 import org.testcontainers.utility.DockerImageName;
 
+import java.io.IOException;
+import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -26,8 +31,11 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -51,6 +59,9 @@ class RoomFlowTest {
     @Autowired RoundExpiry expiry;
     @Autowired TranscriptionWorker worker;
     @Autowired TranscriptionQueue queue;
+    @Autowired TranscriptionMapper transcriptionJobs;
+    @Autowired S3AudioStorage objectStorage;
+    @Autowired AsrArtifactCleanup cleanup;
 
     @BeforeAll static void dependencies() { Startables.deepStart(DATABASE, STORAGE).join(); }
 
@@ -456,10 +467,11 @@ class RoomFlowTest {
         assertThat(get(path + "/comparison", fixture.speaker()).statusCode()).isEqualTo(409);
         String listenerId = listener.get("audioId").asText();
         makeJobDue(listenerId);
-        var late = queue.claim();
+        var late = queue.claim("mock");
         assertThat(late.audioId()).isEqualTo(listenerId);
         database.update("UPDATE rounds SET deadline_at = TIMESTAMPADD(SECOND, -1, CURRENT_TIMESTAMP(6)) WHERE id = ?",
                 fixture.roundId());
+        assertThat(queue.startProvider(late)).isFalse();
         assertThat(queue.complete(late, "到期后返回的复述转写")).isFalse();
         org.awaitility.Awaitility.await().atMost(Duration.ofSeconds(8)).untilAsserted(() -> {
             var snapshot = body(get(fixture.room(), fixture.speaker()));
@@ -478,10 +490,10 @@ class RoomFlowTest {
         var fixture = recordingRoom();
         String id = uploadForProcessing(fixture, "speaker", fixture.speaker(), fixture.version(), true).get("audioId").asText();
         makeJobDue(id);
-        var stale = queue.claim();
+        var stale = queue.claim("mock");
         assertThat(stale.audioId()).isEqualTo(id);
         makeJobDue(id);
-        var current = queue.claim();
+        var current = queue.claim("mock");
         assertThat(current.audioId()).isEqualTo(id);
         assertThat(current.token()).isNotEqualTo(stale.token());
         assertThat(queue.complete(stale, "过期结果")).isFalse();
@@ -492,7 +504,7 @@ class RoomFlowTest {
         var closing = recordingRoom();
         String closingId = uploadForProcessing(closing, "speaker", closing.speaker(), closing.version(), true).get("audioId").asText();
         makeJobDue(closingId);
-        var closingLease = queue.claim();
+        var closingLease = queue.claim("mock");
         assertThat(closingLease.audioId()).isEqualTo(closingId);
         assertThat(post(closing.room() + "/leave", Map.of(), closing.speaker()).statusCode()).isEqualTo(200);
         assertThat(queue.complete(closingLease, "关闭后才返回的结果")).isFalse();
@@ -505,7 +517,7 @@ class RoomFlowTest {
         String id = uploadForProcessing(fixture, "speaker", fixture.speaker(), fixture.version(), true).get("audioId").asText();
         for (int attempt = 1; attempt <= 3; attempt++) {
             makeJobDue(id);
-            var lease = queue.claim();
+            var lease = queue.claim("mock");
             assertThat(lease.audioId()).isEqualTo(id);
             assertThat(queue.retry(lease)).isTrue();
             assertThat(database.queryForObject("SELECT attempts FROM transcription_jobs WHERE audio_id = ?", Integer.class, id))
@@ -534,6 +546,102 @@ class RoomFlowTest {
 
     private void makeJobDue(String audioId) {
         database.update("UPDATE transcription_jobs SET available_at = TIMESTAMPADD(HOUR, -1, CURRENT_TIMESTAMP(6)) WHERE audio_id = ?", audioId);
+    }
+
+    @Test
+    @EnabledIfEnvironmentVariable(named = "ECHO_TEST_FFMPEG", matches = ".+")
+    void fileAsrResumesWithPersistedTaskAndCleansOnlyItsNormalizedObject() throws Exception {
+        exerciseFileAsr(false);
+    }
+
+    @Test
+    @EnabledIfEnvironmentVariable(named = "ECHO_TEST_FFMPEG", matches = ".+")
+    void uncertainFileAsrSubmissionQueriesClientIdWithoutSubmittingAgain() throws Exception {
+        exerciseFileAsr(true);
+    }
+
+    private void exerciseFileAsr(boolean uncertain) throws Exception {
+        var fixture = recordingRoom();
+        var speaker = uploadForProcessing(fixture, "speaker", fixture.speaker(), fixture.version(), true);
+        String audioId = speaker.get("audioId").asText();
+        String vendorId = UUID.randomUUID().toString();
+        var submits = new AtomicInteger();
+        var queries = new AtomicInteger();
+        var signedUrl = new AtomicReference<URI>();
+        var remote = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        remote.createContext("/submit", exchange -> {
+            submits.incrementAndGet();
+            var data = JSON.readTree(exchange.getRequestBody());
+            signedUrl.set(URI.create(data.at("/audio/url").asText()));
+            if (!audioId.equals(exchange.getRequestHeaders().getFirst("X-Api-Request-Id"))) {
+                replyAsr(exchange, 403, "45000001", "{}");
+            } else if (uncertain) {
+                replyAsr(exchange, 503, "55000031", "{}");
+            } else {
+                replyAsr(exchange, 200, "20000000", "{\"task_id\":\"" + vendorId + "\"}");
+            }
+        });
+        remote.createContext("/query", exchange -> {
+            String expected = uncertain ? audioId : vendorId;
+            if (!expected.equals(exchange.getRequestHeaders().getFirst("X-Api-Request-Id"))) {
+                replyAsr(exchange, 403, "45000001", "{}");
+                return;
+            }
+            if (queries.incrementAndGet() == 1) replyAsr(exchange, 200, "20000002", "{}");
+            else replyAsr(exchange, 200, "20000000", "{\"result\":{\"text\":\"真实转码路径测试。\"}}");
+        });
+        remote.start();
+        try {
+            var endpoint = URI.create("http://127.0.0.1:" + remote.getAddress().getPort() + "/");
+            var converter = new FfmpegAudio(System.getenv("ECHO_TEST_FFMPEG"), Duration.ofSeconds(10));
+            var firstWorker = new TranscriptionWorker(queue, Optional.of(new VolcTranscription(queue,
+                    objectStorage, converter, new VolcFileAsr(HTTP, JSON, endpoint, "test-key", "test-resource",
+                    Duration.ofSeconds(4)))), "volc");
+            makeJobDue(audioId);
+            assertThat(queue.claim("volc")).isNull();
+            database.update("UPDATE transcription_jobs SET provider = 'volc', attempts = ? WHERE audio_id = ?",
+                    uncertain ? 2 : 0, audioId);
+            firstWorker.runOne();
+            assertThat(submits).hasValue(1);
+            assertThat(transcriptionJobs.byId(audioId).status()).isEqualTo("PENDING");
+            assertThat(transcriptionJobs.byId(audioId).attempts()).isEqualTo(uncertain ? 1 : 0);
+            assertThat(database.queryForObject("SELECT provider_task_id FROM transcription_jobs WHERE audio_id = ?",
+                    String.class, audioId)).isEqualTo(uncertain ? null : vendorId);
+            assertThat(signedUrl.get().getQuery()).contains("X-Amz-Expires=180");
+            var received = HTTP.send(HttpRequest.newBuilder(signedUrl.get()).GET().build(), HttpResponse.BodyHandlers.ofByteArray());
+            assertThat(received.statusCode()).isEqualTo(200);
+            assertThat(AudioFormat.detect(received.body())).isEqualTo("audio/mpeg");
+
+            var resumedWorker = new TranscriptionWorker(queue, Optional.of(new VolcTranscription(queue,
+                    objectStorage, converter, new VolcFileAsr(HTTP, JSON, endpoint, "test-key", "test-resource",
+                    Duration.ofSeconds(4)))), "volc");
+            makeJobDue(audioId);
+            resumedWorker.runOne();
+            assertThat(transcriptionJobs.byId(audioId).status()).isEqualTo("PENDING");
+            makeJobDue(audioId);
+            resumedWorker.runOne();
+            assertThat(submits).hasValue(1);
+            assertThat(queries).hasValue(2);
+            var transcript = body(get(fixture.path() + "/speaker-transcript", fixture.speaker()));
+            assertThat(transcript.get("text").asText()).isEqualTo("真实转码路径测试。");
+
+            database.update("UPDATE transcription_jobs SET artifact_cleanup_after = CURRENT_TIMESTAMP(6) WHERE audio_id = ?", audioId);
+            cleanup.sweep();
+            assertThat(HTTP.send(HttpRequest.newBuilder(signedUrl.get()).GET().build(),
+                    HttpResponse.BodyHandlers.discarding()).statusCode()).isEqualTo(404);
+            assertThat(get(fixture.path() + "/audio/" + audioId + "/access", fixture.speaker()).statusCode()).isEqualTo(200);
+        } finally {
+            remote.stop(0);
+        }
+    }
+
+    private static void replyAsr(HttpExchange exchange, int status, String asrStatus, String json) throws IOException {
+        try (exchange) {
+            exchange.getResponseHeaders().set("X-Api-Status-Code", asrStatus);
+            byte[] output = json.getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(status, output.length);
+            exchange.getResponseBody().write(output);
+        }
     }
 
     private JsonNode uploadForProcessing(RecordingFixture fixture, String kind, String actor, long version,

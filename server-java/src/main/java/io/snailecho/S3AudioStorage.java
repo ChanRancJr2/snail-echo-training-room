@@ -30,6 +30,7 @@ class S3AudioStorage {
     private final String bucket;
     private final S3Client client;
     private final S3Presigner signer;
+    private final URI accessibleEndpoint;
 
     S3AudioStorage(@Value("${echo.storage.endpoint}") URI endpoint,
                    @Value("${echo.storage.public-endpoint:}") String publicEndpoint,
@@ -48,8 +49,9 @@ class S3AudioStorage {
                 .overrideConfiguration(c -> c.apiCallTimeout(Duration.ofSeconds(20))
                         .apiCallAttemptTimeout(Duration.ofSeconds(12)))
                 .build();
+        accessibleEndpoint = publicEndpoint.isBlank() ? endpoint : URI.create(publicEndpoint);
         signer = S3Presigner.builder().region(awsRegion).credentialsProvider(credentials)
-                .endpointOverride(publicEndpoint.isBlank() ? endpoint : URI.create(publicEndpoint))
+                .endpointOverride(accessibleEndpoint)
                 .serviceConfiguration(s3Config).build();
     }
 
@@ -60,13 +62,39 @@ class S3AudioStorage {
     }
 
     String downloadUrl(String key) {
-        return signer.presignGetObject(p -> p.signatureDuration(Duration.ofSeconds(DOWNLOAD_SECONDS))
+        return downloadUrl(key, Duration.ofSeconds(DOWNLOAD_SECONDS));
+    }
+
+    private String downloadUrl(String key, Duration duration) {
+        return signer.presignGetObject(p -> p.signatureDuration(duration)
                 .getObjectRequest(r -> r.bucket(bucket).key(key).responseCacheControl("private, no-store")))
                 .url().toExternalForm();
     }
 
+    boolean hasHttpsEndpoint() {
+        return "https".equalsIgnoreCase(accessibleEndpoint.getScheme());
+    }
+
+    byte[] readCommitted(AudioMapper.Asset asset) {
+        return readVerified(asset, asset.objectKey());
+    }
+
+    static String asrKey(String audioId) {
+        return "asr/" + audioId + ".mp3";
+    }
+
+    String stageForAsr(String key, byte[] mp3) {
+        try {
+            client.putObject(r -> r.bucket(bucket).key(key).contentType("audio/mpeg")
+                    .cacheControl("private, no-store"), RequestBody.fromBytes(mp3));
+            return downloadUrl(key, Duration.ofMinutes(3));
+        } catch (SdkException failure) {
+            throw new AsrFailure("ASR_STORAGE_UNAVAILABLE", true);
+        }
+    }
+
     String seal(AudioMapper.Asset asset) {
-        byte[] bytes = readVerified(asset);
+        byte[] bytes = readVerified(asset, asset.stagingKey());
         // Each attempt has its own final key. Only the transactional winner is made visible.
         String key = "audio/" + asset.roundId() + "/" + UUID.randomUUID();
         try {
@@ -79,8 +107,8 @@ class S3AudioStorage {
         return key;
     }
 
-    private byte[] readVerified(AudioMapper.Asset asset) {
-        try (var stream = client.getObject(r -> r.bucket(bucket).key(asset.stagingKey()))) {
+    private byte[] readVerified(AudioMapper.Asset asset, String key) {
+        try (var stream = client.getObject(r -> r.bucket(bucket).key(key))) {
             if (!Long.valueOf(asset.byteSize()).equals(stream.response().contentLength())
                     || !asset.mimeType().equals(AudioFormat.mime(stream.response().contentType()))) {
                 stream.abort();
@@ -101,11 +129,13 @@ class S3AudioStorage {
         }
     }
 
-    void discard(String key) {
+    boolean discard(String key) {
         try {
             client.deleteObject(r -> r.bucket(bucket).key(key));
+            return true;
         } catch (SdkException failure) {
             LOG.warn("Unable to clean up an unreferenced audio object");
+            return false;
         }
     }
 

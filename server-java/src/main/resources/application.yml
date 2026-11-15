@@ -5,6 +5,10 @@ server:
     include-message: never
     include-stacktrace: never
 spring:
+  task:
+    scheduling:
+      pool:
+        size: 4
   datasource:
     url: ${JAVA_DB_URL}
     username: ${JAVA_DB_USER}
@@ -39,3 +43,6 @@ echo:
     enabled: ${JAVA_PROCESSING_ENABLED:false}
     mode: ${JAVA_TRANSCRIPTION_MODE:}
     master-key: ${JAVA_TEXT_MASTER_KEY:}
+    speech-api-key: ${SPEECH_API_KEY:}
+    speech-resource-id: ${SPEECH_RESOURCE_ID:}
+    ffmpeg-path: ${JAVA_FFMPEG_PATH:ffmpeg}

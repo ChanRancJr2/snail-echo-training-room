@@ -1,6 +1,6 @@
 # Java API 本地开发
 
-Java 版支持双人同步练，涵盖匿名会话、邀请、录音直传、Mock 转写与对照、双方逐条确认、观察者建议、归档和报告导出。表达者归档后，双方重新准备即可在同一房间开始新一轮，也可以先交换角色。真实转写、语义对照及其他练法仍由 Node.js 版提供。
+Java 版支持双人同步练，涵盖匿名会话、邀请、录音直传、Mock 或火山录音转写、文字匹配对照、双方逐条确认、观察者建议、归档和报告导出。表达者归档后，双方重新准备即可在同一房间开始新一轮，也可以先交换角色。语义对照及其他练法仍由 Node.js 版提供。
 
 ## 启动与验证
 
@@ -65,3 +65,15 @@ $env:JAVA_TEXT_MASTER_KEY = [Convert]::ToBase64String([Security.Cryptography.Ran
 本地对照使用预置转写和文字匹配。对照结果、双方标注和澄清加密保存。复述转写失败或超过生成期限时，房间会回到待准备状态。确认只能由该轮的表达者和复述者分别提交，修改结论或澄清会清除该条原有的双方确认。
 
 在 `product/` 下设置 `$env:ECHO_JAVA_TEST_PROCESSING = '1'` 后运行 `node tests/java-lobby.browser.mjs`，可经同一个 H5 地址验证从录音上传到双方确认、匿名报告导出和同房再开一轮的完整流程。
+
+## 火山录音文件识别
+
+为 Java 进程启用 `JAVA_PROCESSING_ENABLED=true` 和 `JAVA_TRANSCRIPTION_MODE=volc`，保留 `JAVA_TEXT_MASTER_KEY` 和对象存储配置。通过运行环境注入 `SPEECH_API_KEY` 和已开通的 `SPEECH_RESOURCE_ID`，例如 `volc.seedasr.auc`。通过 `JAVA_FFMPEG_PATH` 指定含 `libmp3lame` 的 FFmpeg 可执行文件。对象存储保持私有，`JAVA_STORAGE_PUBLIC_ENDPOINT` 提供火山可从公网访问的 HTTPS 地址，代理须保留签名使用的 Host、路径和查询参数。签名链接有效期为 3 分钟。
+
+开发测试和火山联调使用不同数据库与桶。入队时固定使用的供应商。若在同一环境切换运行模式，先排空原模式的任务。Worker 将已确认录音转成单声道 MP3，再按房间时间上限截断。首次提交记录意图，后续轮询复用返回的任务 ID。提交结果不明确时尝试查询原请求 UUID，查不到可用结果则结束任务，避免再次发送录音。火山排队超过本应用 3 分钟预算时，本轮按转写失败处理。
+
+完成、失败或取消的任务会定期删除 `asr/` 下的临时转码副本。原始录音由训练室的独立数据保留流程管理。部署时为 `asr/` 配置对象生命周期清理，并为 JVM 的 `java.io.tmpdir` 使用受限的临时卷，覆盖进程崩溃等异常。Java 的逐条对照仍用字面匹配。
+
+要运行真实 FFmpeg 和本地模拟火山的验收测试，设置 `ECHO_TEST_FFMPEG` 为本机 FFmpeg 绝对路径，再运行 Maven `verify`。测试不会调用真实火山。火山联调用单独测试房间和合成短音频，先验证 HTTPS 签名可抓取，再核对任务返回文字。
+
+[火山任务提交](https://docs.volcengine.com/docs/doubao-voice/task-submission-http-1?lang=zh) · [查询结果](https://docs.volcengine.com/docs/doubao-voice/result-query-http-1?lang=zh) · [状态码](https://docs.volcengine.com/docs/doubao-voice/error-code-query?lang=zh)
