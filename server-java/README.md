@@ -1,6 +1,6 @@
 # Java API 本地开发
 
-当前 Java 切片支持双人同步练的匿名会话、邀请、准备、开局、录音计时与重录、签名上传与授权播放。同一房间可在归档后换席、重新准备。转写、确认重点、生成对照和其他练法仍需在 Java 后端接通，完整体验使用 Node.js 版。
+当前 Java 切片支持双人同步练的匿名会话、邀请、准备、开局、录音计时、签名直传、Mock 转写、确认重点、授权播放和复述提交。同一房间可在归档后换席、重新准备。真实转写、生成对照及其他练法仍待接入，完整体验使用 Node.js 版。
 
 ## 启动与验证
 
@@ -49,3 +49,17 @@ docker compose -f server-java/compose.yml --profile media up -d --wait
 - `GET /api/rounds/{roundId}/audio/{audioId}/access` 在允许的阶段向成员返回 60 秒播放链接。对象存储提供 Range 读取。
 
 可用 `$env:ECHO_JAVA_TEST_UPLOAD = '1'` 打开浏览器脚本的真实直传和 Range 回放断言。当前切片需要为 `pending/` 配置短期生命周期。提交结果不明确时保留最终对象以避免误删，生产前需补齐数据库引用对账与删除任务。
+
+## 本地 Mock 转写与重点确认
+
+启用录音后，在 Java 启动终端设置以下变量。同一数据库的后续启动需沿用同一文本密钥。本地测试可生成独立密钥，共享环境从机密配置注入。
+
+```powershell
+$env:JAVA_PROCESSING_ENABLED = 'true'
+$env:JAVA_TRANSCRIPTION_MODE = 'mock'
+$env:JAVA_TEXT_MASTER_KEY = [Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(32))
+```
+
+上传确认事务会为每份录音登记一个转写任务。Worker 领取租约，成功后保存加密文本。已过期的租约和已关闭房间的晚到结果均不会写入文本。最多尝试三次。Mock 不对真实录音做识别，界面会将其标为演示转写。失败时表达者仍可手动确认要点。
+
+在 `product/` 下设置 `$env:ECHO_JAVA_TEST_PROCESSING = '1'` 后运行 `node tests/java-lobby.browser.mjs`，验证表达录音 → Mock 转写 → 人工确认重点 → 复述者播放和录音 → 复述提交。流程目前停在 `COMPARING`，等待后续对照处理。

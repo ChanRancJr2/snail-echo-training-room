@@ -49,6 +49,8 @@ class RoomFlowTest {
     @LocalServerPort int port;
     @Autowired JdbcTemplate database;
     @Autowired RoundExpiry expiry;
+    @Autowired TranscriptionWorker worker;
+    @Autowired TranscriptionQueue queue;
 
     @BeforeAll static void dependencies() { Startables.deepStart(DATABASE, STORAGE).join(); }
 
@@ -61,6 +63,10 @@ class RoomFlowTest {
         registry.add("echo.storage.bucket", () -> "echo-private");
         registry.add("echo.storage.access-key", () -> "dev_echo_access");
         registry.add("echo.storage.secret-key", () -> "dev_echo_secret_only");
+        registry.add("echo.processing.enabled", () -> true);
+        registry.add("echo.processing.mode", () -> "mock");
+        registry.add("echo.processing.master-key", () -> java.util.Base64.getEncoder().encodeToString(new byte[32]));
+        registry.add("echo.processing.worker-delay-ms", () -> 3600000);
     }
 
     @Test void onlyOneRoundStartsAfterBothParticipantsAreReady() throws Exception {
@@ -352,14 +358,146 @@ class RoomFlowTest {
         assertThat(body(result).at("/round/stage").asText()).isEqualTo("COMPARING");
     }
 
+    @Test void committedRecordingsAreTranscribedAndConfirmedPointsOpenListenerSeat() throws Exception {
+        var fixture = recordingRoom();
+        String path = fixture.path();
+        var speaker = uploadForProcessing(fixture, "speaker", fixture.speaker(), fixture.version(), true);
+        String speakerId = speaker.get("audioId").asText();
+        assertThat(database.queryForObject("SELECT COUNT(*) FROM transcription_jobs WHERE audio_id = ?", Integer.class,
+                speakerId)).isEqualTo(1);
+        var forbidden = get(path + "/speaker-transcript", fixture.listener());
+        assertThat(forbidden.statusCode()).isEqualTo(403);
+        var ready = awaitTranscript(path + "/speaker-transcript", fixture.speaker());
+        assertThat(ready.get("text").asText()).contains("演示转写");
+        byte[] sealed = database.queryForObject("SELECT result_ciphertext FROM transcription_jobs WHERE audio_id = ?",
+                byte[].class, speakerId);
+        assertThat(sealed).isNotNull();
+        assertThat(new String(sealed, StandardCharsets.UTF_8)).doesNotContain("演示转写");
+
+        long version = speaker.at("/round/version").asLong();
+        var points = Map.of("expectedVersion", version, "points", java.util.List.of(
+                Map.of("category", "需求", "text", "周六先看望家人，再决定是否聚餐")));
+        assertThat(post(path + "/points/confirm", points, fixture.listener()).statusCode()).isEqualTo(403);
+        var confirmed = post(path + "/points/confirm", points, fixture.speaker());
+        assertThat(confirmed.statusCode()).isEqualTo(200);
+        assertThat(body(confirmed).at("/round/stage").asText()).isEqualTo("LISTENER_RETELL");
+        assertThat(body(confirmed).at("/round/deadlineAt").isNull()).isTrue();
+        assertThat(body(post(path + "/points/confirm", points, fixture.speaker())).at("/points/0/id"))
+                .isEqualTo(body(confirmed).at("/points/0/id"));
+        assertThat(post(path + "/points/confirm", Map.of("expectedVersion", version, "points", java.util.List.of(
+                Map.of("category", "事情", "text", "不在允许的分类中"))), fixture.speaker()).statusCode()).isEqualTo(400);
+        assertThat(get(path + "/points", fixture.listener()).statusCode()).isEqualTo(403);
+        assertThat(get(path + "/audio/" + speakerId + "/access", fixture.listener()).statusCode()).isEqualTo(200);
+        assertThat(post(path + "/listening-aid", Map.of("kind", "replay"), fixture.listener()).statusCode()).isEqualTo(200);
+        var begun = body(post(path + "/restart-recording", Map.of("expectedVersion", version + 1, "kind", "listener"),
+                fixture.listener()));
+        var listener = uploadForProcessing(fixture, "listener", fixture.listener(), begun.get("version").asLong(), true);
+        String listenerId = listener.get("audioId").asText();
+        assertThat(listener.at("/round/stage").asText()).isEqualTo("COMPARING");
+        org.awaitility.Awaitility.await().atMost(Duration.ofSeconds(10)).until(() -> {
+            worker.runOne();
+            return "DONE".equals(database.queryForObject("SELECT status FROM transcription_jobs WHERE audio_id = ?", String.class, listenerId));
+        });
+    }
+
+    @Test void reclaimedJobDiscardsExpiredWorkerResultAndClosedRoomResult() throws Exception {
+        var fixture = recordingRoom();
+        String id = uploadForProcessing(fixture, "speaker", fixture.speaker(), fixture.version(), true).get("audioId").asText();
+        makeJobDue(id);
+        var stale = queue.claim();
+        assertThat(stale.audioId()).isEqualTo(id);
+        makeJobDue(id);
+        var current = queue.claim();
+        assertThat(current.audioId()).isEqualTo(id);
+        assertThat(current.token()).isNotEqualTo(stale.token());
+        assertThat(queue.complete(stale, "过期结果")).isFalse();
+        assertThat(queue.complete(current, "新结果")).isTrue();
+        var transcript = body(get(fixture.path() + "/speaker-transcript", fixture.speaker()));
+        assertThat(transcript.get("text").asText()).isEqualTo("新结果");
+
+        var closing = recordingRoom();
+        String closingId = uploadForProcessing(closing, "speaker", closing.speaker(), closing.version(), true).get("audioId").asText();
+        makeJobDue(closingId);
+        var closingLease = queue.claim();
+        assertThat(closingLease.audioId()).isEqualTo(closingId);
+        assertThat(post(closing.room() + "/leave", Map.of(), closing.speaker()).statusCode()).isEqualTo(200);
+        assertThat(queue.complete(closingLease, "关闭后才返回的结果")).isFalse();
+        assertThat(database.queryForObject("SELECT status FROM transcription_jobs WHERE audio_id = ?", String.class, closingId))
+                .isEqualTo("CANCELLED");
+    }
+
+    @Test void retriesAreBoundedAndManualPointsRemainAvailable() throws Exception {
+        var fixture = recordingRoom();
+        String id = uploadForProcessing(fixture, "speaker", fixture.speaker(), fixture.version(), true).get("audioId").asText();
+        for (int attempt = 1; attempt <= 3; attempt++) {
+            makeJobDue(id);
+            var lease = queue.claim();
+            assertThat(lease.audioId()).isEqualTo(id);
+            assertThat(queue.retry(lease)).isTrue();
+            assertThat(database.queryForObject("SELECT attempts FROM transcription_jobs WHERE audio_id = ?", Integer.class, id))
+                    .isEqualTo(attempt);
+        }
+        var transcript = body(get(fixture.path() + "/speaker-transcript", fixture.speaker()));
+        assertThat(transcript.get("status").asText()).isEqualTo("failed");
+        var points = Map.of("expectedVersion", fixture.version() + 1, "points", java.util.List.of(
+                Map.of("category", "事件", "text", "手动确认的要点")));
+        assertThat(post(fixture.path() + "/points/confirm", points, fixture.speaker()).statusCode()).isEqualTo(200);
+    }
+
+    @Test void listenerGetsOnlyShortHintsAfterExplicitlyRevealingThem() throws Exception {
+        var fixture = recordingRoom("keywords");
+        uploadForProcessing(fixture, "speaker", fixture.speaker(), fixture.version(), true);
+        String path = fixture.path();
+        var points = Map.of("expectedVersion", fixture.version() + 1, "points", java.util.List.of(
+                Map.of("category", "需求", "text", "周六先看望家人，再决定是否聚餐")));
+        assertThat(post(path + "/points/confirm", points, fixture.speaker()).statusCode()).isEqualTo(200);
+        assertThat(get(path + "/points", fixture.listener()).statusCode()).isEqualTo(403);
+        assertThat(post(path + "/listening-aid", Map.of("kind", "keywords"), fixture.listener()).statusCode()).isEqualTo(200);
+        assertThat(body(get(path + "/points", fixture.listener())).at("/0/text").asText()).isEqualTo("周六先看望家…");
+        assertThat(body(get(path + "/points", fixture.speaker())).at("/0/text").asText()).isEqualTo("周六先看望家人，再决定是否聚餐");
+        assertThat(get(path + "/points", session()).statusCode()).isEqualTo(403);
+    }
+
+    private void makeJobDue(String audioId) {
+        database.update("UPDATE transcription_jobs SET available_at = TIMESTAMPADD(HOUR, -1, CURRENT_TIMESTAMP(6)) WHERE audio_id = ?", audioId);
+    }
+
+    private JsonNode uploadForProcessing(RecordingFixture fixture, String kind, String actor, long version,
+                                         boolean consent) throws Exception {
+        byte[] wav = sampleWave((short) 200);
+        String uploads = fixture.path() + "/uploads";
+        var requested = post(uploads, Map.of("kind", kind, "mimeType", "audio/wav", "byteSize", wav.length,
+                "idempotencyKey", UUID.randomUUID()), actor);
+        assertThat(requested.statusCode()).isEqualTo(200);
+        var uploaded = body(requested);
+        assertThat(putAudio(uploaded.get("uploadUrl").asText(), "audio/wav", wav)).isBetween(200, 299);
+        var committed = post(uploads + "/" + uploaded.get("audioId").asText() + "/commit",
+                Map.of("expectedVersion", version, "consentToTranscribe", consent), actor);
+        assertThat(committed.statusCode()).isEqualTo(200);
+        return body(committed);
+    }
+
+    private JsonNode awaitTranscript(String path, String actor) {
+        return org.awaitility.Awaitility.await().atMost(Duration.ofSeconds(10)).until(() -> {
+            worker.runOne();
+            var response = get(path, actor);
+            assertThat(response.statusCode()).isEqualTo(200);
+            return body(response);
+        }, value -> "ready".equals(value.path("status").asText()));
+    }
+
     private record RecordingFixture(String room, String roundId, String speaker, String listener, long version) {
         String path() { return "/api/rounds/" + roundId; }
     }
 
     private RecordingFixture recordingRoom() throws Exception {
+        return recordingRoom("auditory");
+    }
+
+    private RecordingFixture recordingRoom(String style) throws Exception {
         String speaker = session();
         String listener = session();
-        var created = body(post("/api/rooms", Map.of("mode", "sync", "createKey", UUID.randomUUID()), speaker));
+        var created = body(post("/api/rooms", Map.of("mode", "sync", "createKey", UUID.randomUUID(), "retellStyle", style), speaker));
         String room = "/api/rooms/" + created.at("/state/id").asText();
         assertThat(post("/api/rooms/join", Map.of("token", created.get("inviteToken").asText()), listener).statusCode()).isEqualTo(200);
         assertThat(post(room + "/ready", Map.of("ready", true), speaker).statusCode()).isEqualTo(200);

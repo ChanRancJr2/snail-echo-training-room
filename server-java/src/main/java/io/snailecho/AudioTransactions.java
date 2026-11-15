@@ -13,10 +13,12 @@ import org.springframework.transaction.annotation.Transactional;
 class AudioTransactions {
     private final RoomMapper rooms;
     private final AudioMapper audio;
+    private final TranscriptionMapper jobs;
 
-    AudioTransactions(RoomMapper rooms, AudioMapper audio) {
+    AudioTransactions(RoomMapper rooms, AudioMapper audio, TranscriptionMapper jobs) {
         this.rooms = rooms;
         this.audio = audio;
+        this.jobs = jobs;
     }
 
     record Confirmation(AudioMapper.Asset asset, RoomMapper.Round round) {}
@@ -54,6 +56,7 @@ class AudioTransactions {
                 ? audio.commitSpeaker(roundId, audioId, version)
                 : audio.commitListener(roundId, audioId, version);
         if (changed != 1 || audio.seal(audioId, objectKey) != 1) throw new ApiFailure(409, "STALE_AUDIO");
+        jobs.enqueue(audioId, roundId);
         String roomId = rooms.roundRoom(roundId);
         rooms.advanceVersion(roomId);
         return new Confirmation(audio.byId(roundId, audioId), rooms.latestRound(roomId));

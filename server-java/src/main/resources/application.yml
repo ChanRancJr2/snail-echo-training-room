@@ -35,3 +35,7 @@ echo:
     bucket: ${JAVA_STORAGE_BUCKET:}
     access-key: ${JAVA_STORAGE_ACCESS_KEY:}
     secret-key: ${JAVA_STORAGE_SECRET_KEY:}
+  processing:
+    enabled: ${JAVA_PROCESSING_ENABLED:false}
+    mode: ${JAVA_TRANSCRIPTION_MODE:}
+    master-key: ${JAVA_TEXT_MASTER_KEY:}

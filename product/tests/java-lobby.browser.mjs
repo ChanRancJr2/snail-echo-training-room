@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import { chromium } from 'playwright';
 
 const origin = process.env.ECHO_PRODUCT_ORIGIN ?? 'http://localhost:3100';
-const verifyUpload = process.env.ECHO_JAVA_TEST_UPLOAD === '1';
+const verifyProcessing = process.env.ECHO_JAVA_TEST_PROCESSING === '1';
+const verifyUpload = verifyProcessing || process.env.ECHO_JAVA_TEST_UPLOAD === '1';
 const executablePath = process.env.BROWSER_EXECUTABLE ??
   (process.platform === 'win32' ? 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe' : undefined);
 const browser = await chromium.launch({
@@ -91,6 +92,23 @@ try {
       const playback = await host.request.get(url, { headers: { Range: 'bytes=0-15' } });
       assert.equal(playback.status(), 206);
       assert.equal((await playback.body()).length, 16);
+      if (verifyProcessing) {
+        await host.getByText('演示转写：周六先看望家人，再决定是否聚餐。').waitFor();
+        await host.getByRole('textbox', { name: '信息点内容' }).fill('先看望家人，再决定是否聚餐');
+        await host.getByRole('button', { name: '添加信息点' }).click();
+        await host.getByRole('button', { name: '确认重点，请搭档复述' }).click();
+        await guest.getByRole('button', { name: '播放表达者录音' }).click();
+        await guest.getByRole('button', { name: /暂停播放|已听过/ }).waitFor();
+        await guest.getByRole('button', { name: '开始录音', exact: true }).click();
+        await guest.locator('.record-time').getByText('00:01', { exact: true }).waitFor();
+        await guest.getByRole('button', { name: '结束录音' }).click();
+        const submit = guest.getByRole('button', { name: '确认上传' });
+        await submit.waitFor();
+        assert.equal(await submit.isDisabled(), true);
+        await guest.getByRole('checkbox', { name: /我知晓复述录音提交后会被转写/ }).check();
+        await submit.click();
+        await guest.getByText('正在转写复述录音并生成逐条对照，请稍候。').waitFor();
+      }
     }
     await host.getByRole('button', { name: '结束并关闭训练室' }).click();
     await guest.getByText('训练室已关闭或会话已失效').waitFor();
@@ -103,6 +121,7 @@ try {
   assert.notEqual(first.roundId, second.roundId);
   console.log('Three Java browser sessions passed: startup, reload, recording, re-recording and reversed roles in a fresh room.');
   if (verifyUpload) console.log('Both browser recordings reached confirmed storage and authorized range playback.');
+  if (verifyProcessing) console.log('Both rounds reached listener submission through Mock transcription, point confirmation and playback.');
 } finally {
   await browser.close();
 }

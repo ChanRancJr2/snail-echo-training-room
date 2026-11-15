@@ -11,7 +11,7 @@ export function PointEditor({ roundId, version, onConfirmed }: { roundId: string
   const [points, setPoints] = useState<Point[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-  const [transcript, setTranscript] = useState<{ status: 'off' | 'pending' | 'ready'; text?: string; candidates?: Point[] }>();
+  const [transcript, setTranscript] = useState<{ status: 'off' | 'pending' | 'ready' | 'failed'; text?: string; candidates?: Point[] }>();
   useEffect(() => {
     const controller = new AbortController();
     let timer: number | undefined;
@@ -50,6 +50,7 @@ export function PointEditor({ roundId, version, onConfirmed }: { roundId: string
   }
   return <section className="point-editor"><h2>本轮信息点</h2><p>请核对候选要点，也可以补充或删除。每条尽量只写一个意思。</p>
     {(!transcript || transcript.status === 'pending') && <div className="notice" role="status">录音转写中，可先手动填写重点。</div>}
+    {transcript?.status === 'failed' && <div className="notice" role="status">本次未能完成转写，可以手动填写重点后继续。</div>}
     {transcript?.status === 'ready' && <details open><summary>表达录音转写</summary><p>{transcript.text || '未识别到清晰的语音。请手动填写要点。'}</p></details>}
     <div className="point-entry"><select aria-label="信息点类别" value={category} onChange={event => setCategory(event.target.value as Category)}>{categories.map(value => <option key={value}>{value}</option>)}</select><input aria-label="信息点内容" maxLength={200} value={text} onChange={event => setText(event.target.value)} placeholder="例如：午饭要看外婆身体情况" /></div>
     <button className="secondary" disabled={!text.trim() || points.length >= 12} onClick={add}>添加信息点</button>
