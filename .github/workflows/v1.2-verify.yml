@@ -1,0 +1,49 @@
+name: V1.2 verification
+
+on:
+  pull_request:
+  push:
+    branches: [main, 'release/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: product/package-lock.json
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+          cache-dependency-path: server-java/pom.xml
+      - name: Install FFmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
+      - name: Verify Vue and shared code
+        working-directory: product
+        env:
+          VITE_ECHO_TARGET: java
+          FFMPEG_PATH: /usr/bin/ffmpeg
+        run: |
+          npm ci
+          npm test
+          npm run build:web
+      - name: Verify Spring Boot with MySQL and object storage
+        env:
+          ECHO_TEST_FFMPEG: /usr/bin/ffmpeg
+        run: mvn --batch-mode --no-transfer-progress --file server-java/pom.xml verify
+      - name: Build the Linux release image
+        run: docker build --file server-java/Dockerfile --tag echo-java:ci .
