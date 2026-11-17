@@ -1,8 +1,11 @@
-# 蜗牛回声训练室
+# 蜗牛回声训练室V1.2
 
-移动优先的语音复述训练室。支持双人同步、双座位自练、亲子同机和异步留言。跨设备参与者通过邀请链接加入。动态 Demo 包括录音、转写、信息点确认、复述对照、双方确认及复盘归档。
+移动优先的语音复述训练室。V1.2 使用 Vue 3 + TypeScript 前端、Java 21 + Spring Boot 后端、MySQL 和私有 S3 兼容对象存储。五种玩法为双人同步练、双座位自练、亲子同机练、异步留言练和单人练习。跨设备参与者通过邀请链接加入。
 
-## 本地运行
+- [V1.2 本地运行、五种玩法验收和上线步骤](server-java/README.md)
+- [V1.2 本地验收入口](http://localhost:3121/)
+
+## 旧版 Node.js Demo 本地运行
 
 需要 Node.js 24、npm 和 Docker Compose。以下命令在仓库根目录执行。
 
@@ -44,12 +47,12 @@ Windows 默认使用本机 Microsoft Edge。使用其他 Chromium 浏览器时�
 
 ## 项目目录
 
-Java 版双人练开局切片可独立启动，见 [Java API 本地开发](server-java/README.md)。
+V1.2 的 Spring Boot API、数据库迁移和镜像配置在 server-java 下。
 
-- `product/apps/web` 是 React H5 前端。
+- `product/apps/web` 是 Vue 3 + TypeScript 的 H5 前端，使用 Vite 构建。
 - `product/apps/api` 包含 Fastify API、数据库迁移、对象存储和转写 Worker。
 - `product/packages/core` 是共享的状态机和录音格式校验。
-- `product/tests` 是四种练法的浏览器回归测试。
+- `product/tests` 包含五种练法的浏览器回归测试。
 - [用户手册](回声训练室-用户手册.docx) 是产品需求参考。 [部署说明](deploy/README.md) 包含独立镜像和真实服务配置。
 
 ## 协作方式
