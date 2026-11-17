@@ -97,7 +97,7 @@ class AudioTransactions {
         if (!"ACTIVE".equals(room.status()) || !roundId.equals(rooms.latestRound(roomId).id())) throw inaccessible();
         boolean speakerAudio = "speaker".equals(asset.kind());
         boolean allowed = switch (round.stage()) {
-            case "KEYPOINT_CONFIRM" -> speakerAudio && actor.equals(round.speakerSessionId());
+            case "KEYPOINT_CONFIRM", "ASYNC_PENDING" -> speakerAudio && actor.equals(round.speakerSessionId());
             case "LISTENER_RETELL", "COMPARING" -> speakerAudio && (participant || "observer".equals(member.role()));
             case "SPEAKER_LABELING", "MUTUAL_CONFIRM", "ADVICE" -> participant || "observer".equals(member.role());
             default -> false;

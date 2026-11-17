@@ -18,6 +18,8 @@
 .round-content .audio-player + .recorder{border-top:1px solid #d6ded8;margin-top:20px;padding-top:18px}
 .audio-player audio{display:block;width:100%;margin-top:8px}
 .audio-player audio:not([controls]){display:none}
+.audio-player-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;align-items:start}
+.audio-player-actions button.secondary{min-height:44px;padding-inline:8px}
 .card input[type=checkbox]{width:auto;margin:3px 6px 0 0;accent-color:#265e5c}
 .card textarea,.search-field input,.review-confirm select{display:block;width:100%;padding:11px;border:1px solid #d6ddd8;border-radius:10px;background:#fff;font:inherit;margin-top:8px}
 .search-field,.toggle-row{display:block;font-size:.875rem}
@@ -36,3 +38,9 @@
 .flow-context[data-seat="speaker"]{background:#f5e3d5;color:#6c3e29}
 .flow-context[data-seat="listener"]{background:#e1eeec;color:#265e5c}
 .flow-context[data-seat]{padding:8px 11px;border-radius:9px}
+
+.login-screen { padding-top: 16px; }
+.login-card label { display: block; font-size: .875rem; font-weight: 700; }
+.login-card input { min-height: 44px; font: inherit; color: inherit; background: #fff; }
+.login-card input:focus-visible { outline: 3px solid #267da3; outline-offset: 2px; }
+.login-card button { min-height: 44px; }

@@ -7,28 +7,38 @@ import org.apache.ibatis.annotations.*;
 
 @Mapper
 interface RoomMapper {
-    record Room(String id, String ownerId, String status, int durationSeconds, String retellStyle, String topic, long version) {}
+    record Room(String id, String ownerId, String status, int durationSeconds, String retellStyle,
+                String topic, long version, String mode, String teenNickname, String teenRole) {}
     record Member(String id, String sessionId, String nickname, String role, boolean ready, String invitationId) {}
     record Invite(String id, String roomId, String role, String passwordHash, Instant expiresAt, int maxUses, int useCount) {}
     record Round(String id, int sequenceNo, String stage, Instant deadlineAt, long version,
                  String speakerSessionId, String listenerSessionId, String speakerAudioId, String listenerAudioId,
-                 String terminalReason) {}
+                 String terminalReason, String teenRole) {}
     record DueRecording(String id, String roomId, long version) {}
 
     String RECORDING_GRACE_CUTOFF = "TIMESTAMPADD(SECOND, -30, CURRENT_TIMESTAMP(6))";
 
-    @Insert("INSERT INTO anonymous_sessions (id, token_hash, nickname, expires_at) VALUES (#{s.id}, #{hash}, #{s.nickname}, #{s.expiresAt})")
+    @Insert("""
+        INSERT INTO anonymous_sessions (id, token_hash, nickname, expires_at, named)
+        VALUES (#{s.id}, #{hash}, #{s.nickname}, #{s.expiresAt}, #{s.named})
+        """)
     void insertSession(@Param("s") SessionService.Session session, @Param("hash") String hash);
 
-    @Select("SELECT id, nickname, expires_at FROM anonymous_sessions WHERE token_hash = #{hash}")
+    @Select("SELECT id, nickname, expires_at, named FROM anonymous_sessions WHERE token_hash = #{hash}")
     SessionService.Session findSession(String hash);
+
+    @Update("""
+        UPDATE anonymous_sessions SET nickname = #{s.nickname}, expires_at = #{s.expiresAt}, named = TRUE
+        WHERE token_hash = #{hash} AND NOT named AND expires_at > CURRENT_TIMESTAMP(6)
+        """)
+    int nameGuest(@Param("s") SessionService.Session session, @Param("hash") String hash);
 
     @Select("SELECT id FROM anonymous_sessions WHERE id = #{id} AND expires_at > CURRENT_TIMESTAMP(6) FOR UPDATE")
     String lockSession(String id);
 
-    String ROOM_COLUMNS = "id, owner_id, status, duration_seconds, retell_style, topic, version";
+    String ROOM_COLUMNS = "id, owner_id, status, duration_seconds, retell_style, topic, version, mode, teen_nickname, teen_role";
     String ROUND_COLUMNS = "id, sequence_no, stage, deadline_at, version, speaker_session_id, listener_session_id, "
-            + "speaker_audio_id, listener_audio_id, terminal_reason";
+            + "speaker_audio_id, listener_audio_id, terminal_reason, teen_role";
 
     @Select("SELECT " + ROOM_COLUMNS + " FROM rooms WHERE id = #{id}")
     Room room(String id);
@@ -40,11 +50,12 @@ interface RoomMapper {
     Room createdRoom(@Param("owner") String owner, @Param("key") String key);
 
     @Insert("""
-        INSERT INTO rooms (id, owner_id, create_key, duration_seconds, retell_style, topic)
-        VALUES (#{id}, #{owner}, #{key}, #{seconds}, #{style}, #{topic})
+        INSERT INTO rooms (id, owner_id, create_key, duration_seconds, retell_style, topic, mode, teen_nickname, teen_role)
+        VALUES (#{id}, #{owner}, #{key}, #{seconds}, #{style}, #{topic}, #{mode}, #{nickname}, #{teenRole})
         """)
     void insertRoom(@Param("id") String id, @Param("owner") String owner, @Param("key") String key,
-                    @Param("seconds") int seconds, @Param("style") String style, @Param("topic") String topic);
+                    @Param("seconds") int seconds, @Param("style") String style, @Param("topic") String topic,
+                    @Param("mode") String mode, @Param("nickname") String nickname, @Param("teenRole") String teenRole);
 
     @Select("""
         SELECT m.id, m.session_id, s.nickname, m.role, m.ready, m.invitation_id
@@ -99,11 +110,25 @@ interface RoomMapper {
     Round latestRound(String id);
 
     @Insert("""
-        INSERT INTO rounds (id, room_id, sequence_no, stage, speaker_session_id, listener_session_id)
-        VALUES (#{id}, #{room}, #{sequence}, 'TASK', #{speaker}, #{listener})
+        INSERT INTO rounds (id, room_id, sequence_no, stage, speaker_session_id, listener_session_id, teen_role)
+        VALUES (#{id}, #{room}, #{sequence}, 'TASK', #{speaker}, #{listener}, #{teenRole})
         """)
     void startRound(@Param("id") String id, @Param("room") String room, @Param("sequence") int sequence,
-                    @Param("speaker") String speakerSessionId, @Param("listener") String listenerSessionId);
+                    @Param("speaker") String speakerSessionId, @Param("listener") String listenerSessionId,
+                    @Param("teenRole") String teenRole);
+
+    @Select("SELECT teen_role FROM rounds WHERE room_id = #{id} ORDER BY sequence_no LIMIT 1")
+    String initialTeenRole(String id);
+
+    @Update("UPDATE rooms SET teen_role = #{role} WHERE id = #{id}")
+    void setTeenRole(@Param("id") String id, @Param("role") String role);
+
+    @Update("""
+        UPDATE rounds SET listener_session_id = #{actor}, stage = 'LISTENER_RETELL',
+            deadline_at = NULL, version = version + 1
+        WHERE id = #{id} AND version = #{version} AND stage = 'ASYNC_PENDING'
+        """)
+    int openMessage(@Param("id") String id, @Param("version") long version, @Param("actor") String actor);
 
     @Select("SELECT room_id FROM rounds WHERE id = #{id}")
     String roundRoom(String id);

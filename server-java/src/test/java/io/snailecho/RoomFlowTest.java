@@ -165,6 +165,29 @@ class RoomFlowTest {
         assertThat(reopened.headers().firstValue("set-cookie")).isEmpty();
     }
 
+    @Test void nicknameLoginPreservesTheCookieIdentityAndAllowsSharedNicknames() throws Exception {
+        String endpoint = "/api/sessions/anonymous";
+        var guest = post(endpoint, Map.of(), "");
+        String cookie = guest.headers().firstValue("set-cookie").orElseThrow().split(";", 2)[0];
+        assertThat(body(guest).path("named").isBoolean()).isTrue();
+        assertThat(body(guest).path("named").asBoolean()).isFalse();
+        for (Object nickname : new Object[]{"　 ", "字".repeat(21), "小\0禾", 123}) {
+            assertThat(post(endpoint, Map.of("nickname", nickname), cookie).statusCode()).isEqualTo(400);
+        }
+        var named = post(endpoint, Map.of("nickname", "  访客  "), cookie);
+        assertThat(named.statusCode()).isEqualTo(200);
+        assertThat(named.headers().firstValue("set-cookie").orElseThrow()).startsWith(cookie + ";").contains("HttpOnly");
+        assertThat(body(named).get("id")).isEqualTo(body(guest).get("id"));
+        assertThat(Instant.parse(body(named).get("expiresAt").asText())).isAfter(Instant.now().plus(Duration.ofDays(29)));
+        assertThat(body(named).path("nickname").asText()).isEqualTo("访客");
+        assertThat(body(named).path("named").asBoolean()).isTrue();
+        assertThat(body(get("/api/me", cookie))).isEqualTo(body(named));
+        assertThat(body(post(endpoint, Map.of("nickname", "访客"), cookie))).isEqualTo(body(named));
+        var other = body(post(endpoint, Map.of("nickname", "访客"), ""));
+        assertThat(other.path("named").asBoolean()).isTrue();
+        assertThat(other.get("id")).isNotEqualTo(body(named).get("id"));
+    }
+
     @Test void concurrentClaimsOfOneInviteDoNotConsumeItTwice() throws Exception {
         String host = session();
         String guestA = session();
@@ -215,14 +238,13 @@ class RoomFlowTest {
         assertThat(prepared.statusCode()).isEqualTo(200);
         assertThat(body(prepared).get("status").asText()).isEqualTo("WAITING");
         assertThat(body(prepared).at("/you/ready").asBoolean()).isFalse();
-        assertThat(post(room + "/start", Map.of(), host).statusCode()).isEqualTo(409);
+        assertThat(body(prepared).at("/you/role").asText()).isEqualTo("listener");
+        assertThat(body(prepared).at("/reportRole").asText()).isEqualTo("speaker");
+        assertThat(post(room + "/start", Map.of(), host).statusCode()).isEqualTo(403);
         assertThat(post(room + "/next-round", nextCommand, host).statusCode()).isEqualTo(200);
         var swap = Map.of("expectedVersion", body(prepared).get("version").asLong());
         assertThat(post(room + "/swap-seats", swap, guest).statusCode()).isEqualTo(403);
-        var swapped = post(room + "/swap-seats", swap, host);
-        assertThat(swapped.statusCode()).isEqualTo(200);
-        assertThat(body(swapped).at("/you/role").asText()).isEqualTo("listener");
-        assertThat(body(swapped).at("/you/owner").asBoolean()).isTrue();
+        assertThat(body(prepared).at("/you/owner").asBoolean()).isTrue();
         assertThat(post(room + "/swap-seats", swap, host).statusCode()).isEqualTo(409);
         post(room + "/ready", Map.of("ready", true), host);
         post(room + "/ready", Map.of("ready", true), guest);
@@ -399,6 +421,20 @@ class RoomFlowTest {
         assertThat(confirmed.statusCode()).isEqualTo(200);
         assertThat(body(confirmed).at("/round/stage").asText()).isEqualTo("LISTENER_RETELL");
         assertThat(body(confirmed).at("/round/deadlineAt").isNull()).isTrue();
+        String engagementPath = path + "/listener-engagement";
+        String visitId = UUID.randomUUID().toString();
+        var engagement = Map.of("visitId", visitId, "playbackMs", 1700, "recordingAttempts", 2, "dwellMs", 4100);
+        assertThat(post(engagementPath, engagement, fixture.speaker()).statusCode()).isEqualTo(403);
+        assertThat(post(engagementPath, engagement, session()).statusCode()).isEqualTo(403);
+        assertThat(post(engagementPath, engagement, fixture.listener()).statusCode()).isEqualTo(204);
+        assertThat(post(engagementPath, Map.of("visitId", visitId, "playbackMs", 10, "recordingAttempts", 1, "dwellMs", 50),
+                fixture.listener()).statusCode()).isEqualTo(204);
+        assertThat(database.queryForMap("""
+                SELECT playback_ms, recording_attempts, dwell_ms FROM listener_engagement
+                WHERE round_id = ? AND visit_id = ?
+                """, fixture.roundId(), visitId)).containsEntry("playback_ms", 1700)
+                .containsEntry("recording_attempts", 2).containsEntry("dwell_ms", 4100);
+        assertThat(get(engagementPath, fixture.listener()).statusCode()).isEqualTo(405);
         assertThat(body(post(path + "/points/confirm", points, fixture.speaker())).at("/points/0/id"))
                 .isEqualTo(body(confirmed).at("/points/0/id"));
         assertThat(post(path + "/points/confirm", Map.of("expectedVersion", version, "points", java.util.List.of(
@@ -430,10 +466,11 @@ class RoomFlowTest {
         assertThat(get(path + "/comparison", session()).statusCode()).isEqualTo(403);
         assertThat(post(review + "label", label, fixture.listener()).statusCode()).isEqualTo(403);
         assertThat(post(review + "label", label, fixture.speaker()).statusCode()).isEqualTo(200);
+        assertThat(post(review + "submit", Map.of("expectedVersion", reviewVersion + 1),
+                fixture.speaker()).statusCode()).isEqualTo(409);
         assertThat(post(review + "confirm", Map.of("expectedVersion", ++reviewVersion, "issueId", issue),
                 fixture.speaker()).statusCode()).isEqualTo(200);
-        assertThat(post(review + "submit", Map.of("expectedVersion", ++reviewVersion),
-                fixture.speaker()).statusCode()).isEqualTo(409);
+        ++reviewVersion;
         assertThat(post(review + "confirm", Map.of("expectedVersion", reviewVersion - 1, "issueId", issue),
                 fixture.listener()).statusCode()).isEqualTo(409);
         assertThat(post(review + "clarify", Map.of("expectedVersion", reviewVersion, "issueId", issue,
@@ -441,12 +478,13 @@ class RoomFlowTest {
         var clarified = body(get(path + "/comparison", fixture.speaker()));
         assertThat(clarified.at("/issues/0/speakerConfirmed").asBoolean()).isFalse();
         assertThat(clarified.at("/issues/0/listenerNote").asText()).isEqualTo("没有说清聚餐的前提");
+        assertThat(post(review + "clarify", Map.of("expectedVersion", ++reviewVersion, "issueId", issue,
+                "note", "仍想核对原话"), fixture.listener()).statusCode()).isEqualTo(200);
+        assertThat(body(get(path + "/comparison", fixture.speaker())).at("/issues/0/listenerNotes").size()).isEqualTo(2);
         assertThat(post(review + "confirm", Map.of("expectedVersion", ++reviewVersion, "issueId", issue),
                 fixture.speaker()).statusCode()).isEqualTo(200);
         ++reviewVersion;
-        assertThat(post(review + "confirm", Map.of("expectedVersion", reviewVersion, "issueId", issue),
-                fixture.listener()).statusCode()).isEqualTo(200);
-        assertThat(post(review + "submit", Map.of("expectedVersion", ++reviewVersion),
+        assertThat(post(review + "submit", Map.of("expectedVersion", reviewVersion),
                 fixture.listener()).statusCode()).isEqualTo(403);
         assertThat(post(review + "submit", Map.of("expectedVersion", reviewVersion),
                 fixture.speaker()).statusCode()).isEqualTo(200);
@@ -455,7 +493,9 @@ class RoomFlowTest {
         assertThat(archived.statusCode()).isEqualTo(200);
         var report = body(get(path + "/comparison", fixture.listener()));
         assertThat(report.at("/report/listenerAudioId").asText()).isEqualTo(listenerId);
-        assertThat(report.at("/issues/0/listenerConfirmed").asBoolean()).isTrue();
+        assertThat(report.at("/issues/0/listenerConfirmed").asBoolean()).isFalse();
+        assertThat(report.at("/excluded").asInt()).isEqualTo(1);
+        assertThat(report.at("/total").asInt()).isZero();
         assertThat(database.queryForObject("SELECT COUNT(*) FROM round_comparisons WHERE round_id = ?",
                 Integer.class, fixture.roundId())).isEqualTo(1);
     }

@@ -4,6 +4,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.Base64;
@@ -15,6 +16,8 @@ import org.springframework.stereotype.Service;
 
 @Service
 public class SessionService {
+    private static final Duration GUEST_LIFETIME = Duration.ofHours(12);
+    private static final Duration NAMED_LIFETIME = Duration.ofDays(30);
     private static final SecureRandom RANDOM = new SecureRandom();
     private static final Pattern TOKEN = Pattern.compile("[A-Za-z0-9_-]{43}");
     private final RoomMapper database;
@@ -23,16 +26,34 @@ public class SessionService {
         this.database = database;
     }
 
-    record Session(String id, String nickname, Instant expiresAt) {}
+    record Session(String id, String nickname, Instant expiresAt, boolean named) {}
     record Issued(Session session, String token) {}
 
-    Issued create(String nickname) {
-        String token = newToken();
-        String name = nickname == null || nickname.isBlank() ? "访客" : nickname.strip();
-        var session = new Session(UUID.randomUUID().toString(), name,
-                Instant.now().plus(12, ChronoUnit.HOURS).truncatedTo(ChronoUnit.MICROS));
-        database.insertSession(session, hash(token));
-        return new Issued(session, token);
+    Issued open(String token, String nickname) {
+        var current = find(token);
+        if (current != null) {
+            if (nickname == null) return new Issued(current, null);
+            if (current.named() && current.nickname().equals(nickname)) return new Issued(current, token);
+            if (!current.named()) {
+                var named = new Session(current.id(), nickname, expiresAfter(NAMED_LIFETIME), true);
+                if (database.nameGuest(named, hash(token)) == 1) return new Issued(named, token);
+                var latest = find(token);
+                if (latest != null && latest.named() && latest.nickname().equals(nickname)) {
+                    return new Issued(latest, token);
+                }
+            }
+        }
+
+        String newToken = newToken();
+        boolean named = nickname != null;
+        var session = new Session(UUID.randomUUID().toString(), named ? nickname : "访客",
+                expiresAfter(named ? NAMED_LIFETIME : GUEST_LIFETIME), named);
+        database.insertSession(session, hash(newToken));
+        return new Issued(session, newToken);
+    }
+
+    private static Instant expiresAfter(Duration lifetime) {
+        return Instant.now().plus(lifetime).truncatedTo(ChronoUnit.MICROS);
     }
 
     Session require(String token) {

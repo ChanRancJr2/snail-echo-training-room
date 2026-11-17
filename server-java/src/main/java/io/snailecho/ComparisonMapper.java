@@ -101,9 +101,12 @@ interface ComparisonMapper {
                 @Param("next") String next);
 
     @Select("""
-        SELECT r.focus, s.nickname AS speaker, l.nickname AS listener,
+        SELECT r.focus,
+            CASE WHEN r.teen_role = 'speaker' THEN room.teen_nickname ELSE s.nickname END AS speaker,
+            CASE WHEN r.teen_role = 'listener' THEN room.teen_nickname ELSE l.nickname END AS listener,
             CASE WHEN r.keywords_used THEN 3 WHEN r.replay_used THEN 2 ELSE 1 END AS hint_level
-        FROM rounds r JOIN anonymous_sessions s ON s.id = r.speaker_session_id
+        FROM rounds r JOIN rooms room ON room.id = r.room_id
+        JOIN anonymous_sessions s ON s.id = r.speaker_session_id
         JOIN anonymous_sessions l ON l.id = r.listener_session_id WHERE r.id = #{id}
         """)
     ReportDetails report(String id);

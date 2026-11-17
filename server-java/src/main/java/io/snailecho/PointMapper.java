@@ -22,10 +22,10 @@ interface PointMapper {
     void insert(@Param("round") String roundId, @Param("point") StoredPoint point);
 
     @Update("""
-        UPDATE rounds SET stage = 'LISTENER_RETELL', deadline_at = NULL, version = version + 1
+        UPDATE rounds SET stage = #{nextStage}, deadline_at = NULL, version = version + 1
         WHERE id = #{id} AND version = #{version} AND stage = 'KEYPOINT_CONFIRM' AND speaker_audio_id IS NOT NULL
         """)
-    int confirm(@Param("id") String roundId, @Param("version") long version);
+    int confirm(@Param("id") String roundId, @Param("version") long version, @Param("nextStage") String nextStage);
 
     @Update("""
         UPDATE rounds SET replay_used = replay_used OR (#{kind} = 'replay'),

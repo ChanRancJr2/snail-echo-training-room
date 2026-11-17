@@ -32,6 +32,7 @@ export interface ComparisonIssue {
 export interface Round {
   terminalReason?: 'TIMEOUT' | 'COMPARISON_FAILED';
   adviceAccepted?: boolean;
+  listenerAdviceAccepted?: boolean;
   id: string;
   roomId: string;
   mode: Mode;
@@ -229,10 +230,13 @@ export function applyRoundCommand(round: Round, command: Command, context: Trans
       if (round.issues.some(issue => issue.speakerConfirmedRevision !== issue.revision || issue.listenerConfirmedRevision !== issue.revision)) fail('UNCONFIRMED_ISSUES', 'Both roles must confirm every issue');
       next = { ...round, stage: 'ADVICE' };
       break;
-    case 'advice-accepted':
-      requireStage(round, 'ADVICE'); requireRole(round, context, 'speaker');
-      next = { ...round, adviceAccepted: true };
+    case 'advice-accepted': {
+      requireStage(round, 'ADVICE');
+      const role = memberRole(round, context);
+      if (role === 'observer') fail('FORBIDDEN_ROLE', 'Observer cannot accept advice');
+      next = role === 'speaker' ? { ...round, adviceAccepted: true } : { ...round, listenerAdviceAccepted: true };
       break;
+    }
     case 'archived':
       requireStage(round, 'ADVICE'); requireRole(round, context, 'speaker');
       next = { ...round, stage: 'ARCHIVED', deadlineAt: null };

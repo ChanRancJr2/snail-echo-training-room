@@ -25,6 +25,10 @@ spring:
   mvc:
     problemdetails:
       enabled: false
+  servlet:
+    multipart:
+      max-file-size: 15000000B
+      max-request-size: 16MB
 mybatis:
   configuration:
     map-underscore-to-camel-case: true

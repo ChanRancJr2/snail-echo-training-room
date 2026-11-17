@@ -68,18 +68,19 @@ export class PgPointStore {
   }
 
   async list(roundId: string, sessionId: string): Promise<PointView[]> {
-    const row = (await this.pool.query<{ room_id: string; stage: string; retell_style: string; snapshot: Round }>(
+    const row = (await this.pool.query<{ room_id: string; stage: string; room_status: string; retell_style: string; snapshot: Round }>(
       'SELECT r.room_id, r.stage, r.snapshot, room.retell_style FROM rounds r JOIN rooms room ON room.id = r.room_id WHERE r.id = $1', [roundId])).rows[0];
     if (!row) throw new RoomError('ROUND_NOT_FOUND', 404);
     const member = (await this.pool.query<{ role: string; id: string }>('SELECT id, role FROM room_members WHERE room_id = $1 AND session_id = $2 AND active', [row.room_id, sessionId])).rows[0];
     if (!member) throw new RoomError('NOT_ROOM_MEMBER', 403);
-    if (member.role === 'observer' || (member.id === row.snapshot.listenerId && row.stage === 'LISTENER_RETELL' && row.retell_style !== 'keywords') ||
+    const observerHints = member.role === 'observer' && row.room_status === 'ACTIVE' && row.stage === 'LISTENER_RETELL' && row.retell_style === 'keywords';
+    if ((member.role === 'observer' && !observerHints) || (member.id === row.snapshot.listenerId && row.stage === 'LISTENER_RETELL' && row.retell_style !== 'keywords') ||
       (member.role === 'listener' && (row.retell_style !== 'keywords' || row.stage !== 'LISTENER_RETELL'))) {
       throw new RoomError('POINTS_HIDDEN', 403);
     }
     const result = await this.pool.query<{ id: string; position: number; category: PointCategory; content_ciphertext: Buffer; nonce: Buffer; key_ref: string }>(
       'SELECT id, position, category, content_ciphertext, nonce, key_ref FROM key_points WHERE round_id = $1 ORDER BY position', [roundId]);
-    const hints = member.id === row.snapshot.listenerId && row.stage === 'LISTENER_RETELL';
+    const hints = observerHints || member.id === row.snapshot.listenerId && row.stage === 'LISTENER_RETELL';
     return result.rows.map(point => {
       const text = this.cipher.decrypt(point.content_ciphertext, point.nonce, point.key_ref);
       return { id: point.id, position: point.position, category: point.category, text: hints && text.length > 6 ? `${text.slice(0, 6)}…` : text };

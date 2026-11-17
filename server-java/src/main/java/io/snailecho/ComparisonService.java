@@ -33,42 +33,63 @@ class ComparisonService {
             return new Item(id, category, original, speakerQuote, listenerQuote, complete, accurate, clarification, changed);
         }
     }
+    record Observation(String tag, String note) {}
     record Feedback(String tag, String resolution, boolean speakerConfirmed, boolean listenerConfirmed,
-                    String listenerNote, String observerTag, String observerNote) {
+                    String listenerNote, String observerTag, String observerNote,
+                    List<String> listenerNotes, List<Observation> observations) {
+        Feedback {
+            listenerNotes = listenerNotes != null ? List.copyOf(listenerNotes)
+                    : listenerNote != null ? List.of(listenerNote) : List.of();
+            observations = observations != null ? List.copyOf(observations)
+                    : observerTag != null ? List.of(new Observation(observerTag, observerNote)) : List.of();
+        }
+        Feedback(String tag, String resolution, boolean speakerConfirmed, boolean listenerConfirmed,
+                 String listenerNote, String observerTag, String observerNote) {
+            this(tag, resolution, speakerConfirmed, listenerConfirmed, listenerNote, observerTag, observerNote, null, null);
+        }
         Feedback label(String tag, String resolution) {
             if (tag.equals(this.tag) && resolution.equals(this.resolution)) return this;
-            return new Feedback(tag, resolution, false, false, listenerNote, observerTag, observerNote);
+            return new Feedback(tag, resolution, false, false, listenerNote, observerTag, observerNote, listenerNotes, observations);
         }
         Feedback clarify(String note) {
             if (note.equals(listenerNote)) return this;
-            return new Feedback(tag, resolution, false, false, note, observerTag, observerNote);
+            return new Feedback(tag, resolution, false, false, note, observerTag, observerNote, append(listenerNotes, note), observations);
         }
         Feedback observe(String tag, String note) {
-            return new Feedback(this.tag, resolution, speakerConfirmed, listenerConfirmed, listenerNote, tag, note);
+            var suggestion = new Observation(tag, note);
+            if (!observations.isEmpty() && suggestion.equals(observations.getLast())) return this;
+            return new Feedback(this.tag, resolution, speakerConfirmed, listenerConfirmed, listenerNote, tag, note,
+                    listenerNotes, append(observations, suggestion));
         }
         Feedback confirm(String role) {
             return new Feedback(tag, resolution, speakerConfirmed || "speaker".equals(role),
-                    listenerConfirmed || "listener".equals(role), listenerNote, observerTag, observerNote);
+                    listenerConfirmed || "listener".equals(role), listenerNote, observerTag, observerNote, listenerNotes, observations);
         }
     }
-    record Review(List<Item> items, boolean adviceAccepted, String provider) {}
+    private static <T> List<T> append(List<T> items, T item) {
+        var updated = new ArrayList<>(items);
+        updated.add(item);
+        return updated;
+    }
+    record Review(List<Item> items, boolean adviceAccepted, String provider, boolean listenerAdviceAccepted) {}
     record Label(String issueId, String tag, String resolution) {}
     record Issue(String id, String category, String original, String speakerQuote, String listenerQuote,
                  boolean complete, boolean accurate, String tag, String clarification, String resolution,
                  boolean speakerConfirmed, boolean listenerConfirmed, String listenerNote,
-                 String observerTag, String observerNote) {
+                 String observerTag, String observerNote, List<String> listenerNotes, List<Observation> observations) {
         Issue(Item item) {
             this(item.id(), item.category(), item.original(), item.speakerQuote(), item.listenerQuote(),
                     item.complete(), item.accurate(), item.feedback().tag(), item.clarification(), item.feedback().resolution(),
                     item.feedback().speakerConfirmed(), item.feedback().listenerConfirmed(), item.feedback().listenerNote(),
-                    item.feedback().observerTag(), item.feedback().observerNote());
+                    item.feedback().observerTag(), item.feedback().observerNote(),
+                    item.feedback().listenerNotes(), item.feedback().observations());
         }
     }
     record Transcripts(String speaker, String listener) {}
     record Report(String topic, String focus, String speaker, String listener, String speakerAudioId,
                   String listenerAudioId, int hintLevel) {}
     record View(int total, long complete, long accurate, List<Issue> issues, boolean adviceAccepted,
-                Transcripts transcripts, Report report, String provider) {}
+                Transcripts transcripts, Report report, String provider, int excluded, boolean listenerAdviceAccepted) {}
     record Practice(long complete, int total) {}
     record Updated(String id, String stage, long version) {}
     record LeasedComparison(ComparisonMapper.Candidate candidate, String token, List<ArkComparison.Point> points,
@@ -175,7 +196,7 @@ class ComparisonService {
 
     private void storeComparison(ComparisonMapper.Candidate candidate, RoomMapper.Round round, List<Item> items,
                                  String provider) {
-        comparisons.insert(round.id(), seal(round.id(), new Review(items, false, provider)));
+        comparisons.insert(round.id(), seal(round.id(), new Review(items, false, provider, false)));
         advance(round, "SPEAKER_LABELING");
         rooms.advanceVersion(candidate.roomId());
     }
@@ -214,8 +235,9 @@ class ComparisonService {
         } catch (IllegalStateException unreadableReport) {
             return null;
         }
-        return review.adviceAccepted()
-                ? new Practice(review.items().stream().filter(Item::complete).count(), review.items().size()) : null;
+        var scored = review.items().stream().filter(ComparisonService::countsInResults).toList();
+        return review.adviceAccepted() && !scored.isEmpty()
+                ? new Practice(scored.stream().filter(Item::complete).count(), scored.size()) : null;
     }
 
     @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
@@ -228,8 +250,10 @@ class ComparisonService {
         }
         var review = load(id);
         var items = review.items();
-        long complete = items.stream().filter(Item::complete).count();
-        long accurate = items.stream().filter(Item::accurate).count();
+        var scored = archived || "ADVICE".equals(round.stage())
+                ? items.stream().filter(ComparisonService::countsInResults).toList() : items;
+        long complete = scored.stream().filter(Item::complete).count();
+        long accurate = scored.stream().filter(Item::accurate).count();
         Transcripts texts = null;
         if (archived || complete == items.size() && accurate == items.size()) {
             String speaker = transcript(round.speakerAudioId());
@@ -242,8 +266,13 @@ class ComparisonService {
             report = new Report(access.room().topic(), details.focus(), details.speaker(), details.listener(),
                     round.speakerAudioId(), round.listenerAudioId(), details.hintLevel());
         }
-        return new View(items.size(), complete, accurate, items.stream().map(Issue::new).toList(),
-                review.adviceAccepted(), texts, report, review.provider() == null ? "mock" : review.provider());
+        return new View(scored.size(), complete, accurate, items.stream().map(Issue::new).toList(),
+                review.adviceAccepted(), texts, report, review.provider() == null ? "mock" : review.provider(),
+                items.size() - scored.size(), review.listenerAdviceAccepted());
+    }
+
+    private static boolean countsInResults(Item item) {
+        return !item.problem() || item.feedback().speakerConfirmed() && item.feedback().listenerConfirmed();
     }
 
     public Updated label(String id, String actor, long version, List<Label> labels) {
@@ -254,10 +283,14 @@ class ComparisonService {
         if (submitted.size() != labels.size() || !submitted.equals(problemIds)) {
             throw new ApiFailure(400, "LABELS_MUST_COVER_ALL_ISSUES");
         }
+        boolean sameDevice = actor.equals(access.round().listenerSessionId());
         for (var label : labels) {
-            review = editIssue(review, label.issueId(), feedback -> feedback.label(label.tag(), label.resolution()));
+            review = editIssue(review, label.issueId(), feedback -> {
+                var tagged = feedback.label(label.tag(), label.resolution());
+                return sameDevice ? tagged.confirm("speaker").confirm("listener") : tagged;
+            });
         }
-        return persist(access, review, "MUTUAL_CONFIRM");
+        return persist(access, review, sameDevice ? "ADVICE" : "MUTUAL_CONFIRM");
     }
 
     public Updated revise(String id, String actor, long version, Label label) {
@@ -285,17 +318,20 @@ class ComparisonService {
         var access = edit(id, actor, version, "speaker", "MUTUAL_CONFIRM");
         var review = load(id);
         if (review.items().stream().filter(Item::problem).map(Item::feedback)
-                .anyMatch(item -> !item.speakerConfirmed() || !item.listenerConfirmed())) {
+                .anyMatch(item -> !item.speakerConfirmed())) {
             throw new ApiFailure(409, "CONFIRMATIONS_REQUIRED");
         }
         return persist(access, review, "ADVICE");
     }
 
     public Updated adopt(String id, String actor, long version) {
-        var access = edit(id, actor, version, "speaker", "ADVICE");
+        var access = edit(id, actor, version, null, "ADVICE");
+        if ("observer".equals(access.role())) throw new ApiFailure(403, "FORBIDDEN_ROLE");
         var review = load(id);
-        if (review.adviceAccepted()) return current(access.round());
-        return persist(access, new Review(review.items(), true, review.provider()), "ADVICE");
+        boolean speaker = "speaker".equals(access.role());
+        if (speaker ? review.adviceAccepted() : review.listenerAdviceAccepted()) return current(access.round());
+        return persist(access, new Review(review.items(), speaker || review.adviceAccepted(), review.provider(),
+                !speaker || review.listenerAdviceAccepted()), "ADVICE");
     }
 
     private Updated changeIssue(Access access, String issueId, UnaryOperator<Feedback> change) {
@@ -311,7 +347,7 @@ class ComparisonService {
             var item = items.get(i);
             if (item.id().equals(issueId) && item.problem()) {
                 items.set(i, item.withFeedback(change.apply(item.feedback())));
-                return new Review(List.copyOf(items), review.adviceAccepted(), review.provider());
+                return new Review(List.copyOf(items), review.adviceAccepted(), review.provider(), review.listenerAdviceAccepted());
             }
         }
         throw new ApiFailure(404, "ISSUE_NOT_FOUND");

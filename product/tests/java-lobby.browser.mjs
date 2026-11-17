@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { chromium } from 'playwright';
+import { loginWithNickname } from './helpers/nickname.mjs';
 
 const origin = process.env.ECHO_PRODUCT_ORIGIN ?? 'http://localhost:3100';
 const verifyProcessing = process.env.ECHO_JAVA_TEST_PROCESSING === '1';
@@ -17,11 +18,19 @@ try {
   const startupErrors = [];
   const watchStartup = response => {
     const pathname = new URL(response.url()).pathname;
-    if (response.status() >= 400) startupErrors.push({ pathname, status: response.status() });
+    if (response.status() >= 400 && !(pathname === '/api/me' && response.status() === 401)) {
+      startupErrors.push({ pathname, status: response.status() });
+    }
   };
   for (const page of [a, b, c]) page.on('response', watchStartup);
   await Promise.all([a, b, c].map(page => page.goto(origin)));
-  await Promise.all([a, b, c].map(page => page.getByText('匿名会话已建立').waitFor()));
+  const [firstSession, secondSession] = await Promise.all([
+    loginWithNickname(a, '同名搭档'), loginWithNickname(b, '同名搭档'), loginWithNickname(c, '观察员'),
+  ]);
+  assert.notEqual(firstSession.id, secondSession.id);
+  await a.reload();
+  await a.getByText('已登录 · 同名搭档', { exact: true }).waitFor();
+  assert.equal((await (await a.request.get(`${origin}/api/me`)).json()).id, firstSession.id);
   const icon = await a.locator('link[rel="icon"]').getAttribute('href');
   assert.ok(icon && (await a.request.get(new URL(icon, origin).href)).ok());
   assert.deepEqual(startupErrors, []);
@@ -29,12 +38,14 @@ try {
 
   async function round(host, guest, observer) {
     await host.getByRole('button', { name: /双人同步练/ }).click();
+    if (observer) await host.getByRole('button', { name: '关键词辅助' }).click();
     const created = host.waitForResponse(response => response.url().endsWith('/api/rooms') &&
       response.request().method() === 'POST' && response.ok());
     await host.getByRole('button', { name: '创建训练室' }).click();
     const { inviteToken, state } = await (await created).json();
     await guest.goto(`${origin}/#invite=${inviteToken}`);
-    await guest.getByRole('button', { name: '加入', exact: true }).click();
+    await guest.getByText('你的座位：复述者', { exact: false }).waitFor();
+    assert.equal(await guest.getByLabel('邀请密码').count(), 0);
 
     if (observer) {
       await host.getByRole('button', { name: '观察者', exact: true }).click();
@@ -42,7 +53,7 @@ try {
       await host.getByRole('button', { name: '生成观察者邀请' }).click();
       const { token } = await (await invitation).json();
       await observer.goto(`${origin}/#invite=${token}`);
-      await observer.getByRole('button', { name: '加入', exact: true }).click();
+      await observer.getByText('你的座位：观察者', { exact: false }).waitFor();
       await observer.getByRole('button', { name: '准备好了' }).click();
       await observer.getByRole('button', { name: '取消准备' }).waitFor();
     }
@@ -97,9 +108,26 @@ try {
         await host.getByRole('textbox', { name: '信息点内容' }).fill('先看望家人，再决定是否聚餐');
         await host.getByRole('button', { name: '添加信息点' }).click();
         await host.getByRole('button', { name: '确认重点，请搭档复述' }).click();
+        if (observer) {
+          await observer.getByRole('button', { name: '播放表达者录音' }).waitFor();
+          assert.equal(await observer.getByRole('button', { name: '开始录音' }).count(), 0);
+          await observer.getByRole('button', { name: '查看关键词提示' }).click();
+          await observer.getByText('先看望家人，…', { exact: false }).waitFor();
+          const points = origin + '/api/rounds/' + snapshot.roundId + '/points';
+          assert.equal((await guest.request.get(points)).status(), 403);
+          await guest.getByRole('button', { name: '查看关键词提示' }).click();
+          await guest.getByText('先看望家人，…', { exact: false }).waitFor();
+        }
         await guest.getByRole('button', { name: '播放表达者录音' }).click();
         await guest.getByRole('button', { name: /暂停播放|已听过/ }).waitFor();
+        await guest.waitForFunction(() => (document.querySelector('.audio-player audio')?.currentTime ?? 0) > 0.15);
+        const engagement = guest.waitForResponse(response => {
+          if (!response.url().endsWith('/listener-engagement') || response.status() !== 204) return false;
+          const data = response.request().postDataJSON();
+          return data.recordingAttempts === 1 && data.playbackMs > 0 && data.dwellMs > 0;
+        });
         await guest.getByRole('button', { name: '开始录音', exact: true }).click();
+        await engagement;
         await guest.locator('.record-time').getByText('00:01', { exact: true }).waitFor();
         await guest.getByRole('button', { name: '结束录音' }).click();
         const submit = guest.getByRole('button', { name: '确认上传' });
@@ -111,30 +139,80 @@ try {
         assert.equal((await (await comparisonCommit).json()).round.stage, 'COMPARING');
         await host.getByText('演示对照使用预置转写和文字匹配。').waitFor();
         if (observer) {
-          await observer.getByRole('textbox', { name: '第 1 条观察建议' }).fill('可以问清聚餐前提');
-          await observer.getByRole('button', { name: '提交观察建议' }).click();
-          await host.getByText(/观察者建议.*可以问清聚餐前提/).waitFor();
+          await observer.getByRole('heading', { name: '先看差异' }).waitFor();
+          await observer.getByRole('button', { name: '播放复述者录音' }).waitFor();
+          assert.equal(await observer.getByRole('button', { name: '播放表达者录音' }).count(), 0);
+          assert.equal(await observer.getByRole('button', { name: '提交观察建议' }).count(), 0);
+          await observer.getByRole('button', { name: '播放复述者录音' }).click();
+          await observer.waitForFunction(() => (document.querySelector('.audio-player audio')?.currentTime ?? 0) > 0);
         }
         await host.getByRole('button', { name: '请表达者逐条标注' }).click();
         await host.getByRole('combobox', { name: /结论/ }).selectOption('expression');
         await host.getByRole('button', { name: '提交标注，邀请双方确认' }).click();
         const reviewSubmit = host.getByRole('button', { name: '表达者提交，查看改写建议' });
         await reviewSubmit.waitFor();
+        if (observer) {
+          await observer.getByRole('heading', { name: '把误解逐条聊清楚' }).waitFor();
+          assert.deepEqual(await observer.locator('.round-content .audio-player').evaluateAll(players => players.map(player => player.dataset.recordingLabel)), ['表达者录音', '复述者录音']);
+          for (const note of ['可以问清聚餐前提', '建议再听一遍原句']) {
+            await observer.getByRole('textbox', { name: '第 1 条观察建议' }).fill(note);
+            await observer.getByRole('button', { name: '提交观察建议' }).click();
+            await host.getByText(new RegExp('观察者建议.*' + note)).waitFor();
+          }
+        }
         assert.equal(await reviewSubmit.isDisabled(), true);
-        await host.getByRole('button', { name: '确认这一条' }).click();
         await guest.getByText('待双方确认的结论：表达问题').waitFor();
-        await guest.getByText('表达者：已确认 · 复述者：待确认').waitFor();
-        await guest.getByRole('button', { name: '确认这一条' }).click();
+        for (const note of ['我听到的是另一个安排', '我仍想核对原话']) {
+          await guest.getByRole('textbox', { name: '第 1 条澄清' }).fill(note);
+          await guest.getByRole('button', { name: '提交澄清' }).click();
+          await host.getByText('复述者澄清：' + note).waitFor();
+        }
+        await host.getByRole('button', { name: '确认这一条' }).click();
         assert.equal(await guest.getByRole('button', { name: '表达者提交，查看改写建议' }).count(), 0);
         await reviewSubmit.click();
-        await host.getByRole('heading', { name: '下一次可以这样确认' }).waitFor();
+        await host.getByRole('heading', { name: '给表达者的建议' }).waitFor();
+        await guest.getByRole('heading', { name: '给复述者的建议' }).waitFor();
+        if (observer) {
+          await observer.getByRole('heading', { name: '给表达者的建议' }).waitFor();
+          await observer.getByRole('heading', { name: '给复述者的建议' }).waitFor();
+          assert.equal(await observer.locator('.round-content .audio-player').count(), 0);
+          assert.equal(await observer.getByRole('button', { name: '采纳这条建议' }).count(), 0);
+        }
+        const refreshed = host.waitForResponse(async response => response.url().endsWith('/comparison') &&
+          response.ok() && (await response.json()).listenerAdviceAccepted === true);
+        await guest.getByRole('button', { name: '采纳这条建议' }).click();
+        await guest.getByRole('button', { name: '已采纳' }).waitFor();
+        await guest.reload();
+        await guest.getByRole('button', { name: '已采纳' }).waitFor();
+        await refreshed;
+        assert.equal(await host.getByRole('button', { name: '已采纳' }).count(), 0);
         await host.getByRole('button', { name: '采纳这条建议' }).click();
         await host.getByRole('button', { name: '已采纳' }).waitFor();
         await host.getByRole('button', { name: '归档本轮并查看报告' }).click();
         await guest.getByText('本轮报告已归档。').waitFor();
+        await guest.getByText('1 条未达成一致，不计入本轮结果。').waitFor();
+        const ownRecording = (page, label) => page.locator(`.report-media [data-recording-label="${label}"]`);
+        const hostConsent = ownRecording(host, '表达者录音').getByRole('button', { name: '上传素材库', exact: true });
+        const guestConsent = ownRecording(guest, '复述者录音').getByRole('button', { name: '上传素材库', exact: true });
+        await hostConsent.waitFor();
+        await guestConsent.waitFor();
+        const consentPath = `${origin}/api/rounds/${snapshot.roundId}/audio/${audioId}/material-consent`;
+        assert.equal((await guest.request.get(consentPath)).status(), 403);
+        assert.equal((await guest.request.post(consentPath, { headers: { Origin: origin } })).status(), 403);
+        if (observer) assert.equal((await observer.request.get(consentPath)).status(), 403);
+        assert.equal(await ownRecording(host, '复述者录音').getByRole('button', { name: '上传素材库', exact: true }).count(), 0);
+        assert.equal(await ownRecording(guest, '表达者录音').getByRole('button', { name: '上传素材库', exact: true }).count(), 0);
+        host.once('dialog', dialog => dialog.accept());
+        await hostConsent.click();
+        await host.getByRole('button', { name: '已同意上传', exact: true }).waitFor();
+        await host.reload();
+        await host.getByRole('button', { name: '已同意上传', exact: true }).waitFor();
+        assert.deepEqual(await (await host.request.post(consentPath, { headers: { Origin: origin } })).json(), { submitted: true });
+        assert.equal(await guestConsent.isEnabled(), true);
         if (observer) {
+          await observer.getByRole('button', { name: '返回训练室，继续做观察者' }).click();
           const snapshot = await (await observer.request.get(`${origin}/api/rooms/${state.id}`)).json();
-          assert.equal(snapshot.stage, null);
+          assert.equal(snapshot.reportRole, 'observer');
           assert.equal(snapshot.speakerAudioId, null);
           assert.equal(snapshot.listenerAudioId, null);
         }
@@ -143,19 +221,18 @@ try {
         const exportReport = await guest.getByRole('link', { name: '导出本轮报告（TXT）' }).getAttribute('href');
         assert.match(decodeURIComponent(exportReport), /座位 A\n座位 B/);
         assert.doesNotMatch(decodeURIComponent(exportReport), /先看望家人/);
-        await host.getByRole('button', { name: '返回训练室，准备下一轮' }).click();
-        await guest.getByRole('button', { name: '返回训练室，准备下一轮' }).click();
-        await host.getByRole('button', { name: '准备好了' }).click();
-        assert.equal(await host.getByRole('button', { name: '开始本轮' }).isDisabled(), true);
+        await host.getByRole('button', { name: '返回训练室，成为复述者' }).click();
+        await guest.getByRole('button', { name: '返回训练室，成为表达者' }).click();
         await guest.getByRole('button', { name: '准备好了' }).click();
-        const secondStart = host.waitForResponse(response => response.url().endsWith('/start') && response.ok());
-        await host.getByRole('button', { name: '开始本轮' }).click();
+        assert.equal(await guest.getByRole('button', { name: '开始本轮' }).isDisabled(), true);
+        await host.getByRole('button', { name: '准备好了' }).click();
+        const secondStart = guest.waitForResponse(response => response.url().endsWith('/start') && response.ok());
+        await guest.getByRole('button', { name: '开始本轮' }).click();
         const next = await (await secondStart).json();
         assert.equal(next.stage, 'TASK');
         assert.equal(next.deadlineAt, null);
         assert.notEqual(next.roundId, snapshot.roundId);
-        assert.deepEqual(next.previousPractice, { complete: 0, total: 1 });
-        await host.getByText(/上轮采纳的建议/).waitFor();
+        assert.equal(next.previousPractice, null);
       }
     }
     await host.getByRole('button', { name: '结束并关闭训练室' }).click();

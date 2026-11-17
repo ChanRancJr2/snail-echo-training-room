@@ -1,10 +1,12 @@
 package io.snailecho;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
@@ -23,6 +25,8 @@ import static io.snailecho.ApiFailure.invalid;
 @RestController
 class RoomController {
     private static final String SESSION = "echo_session";
+    private static final java.util.regex.Pattern NICKNAME =
+            java.util.regex.Pattern.compile("(?Us)\\A[\\s\\uFEFF]*+(.{1,20}?)[\\s\\uFEFF]*+\\z");
     private final RoomService rooms;
     private final SessionService sessions;
     private final String origin;
@@ -33,11 +37,12 @@ class RoomController {
         this.origin = origin;
     }
 
-    record SessionRequest(@Size(max = 20) String nickname) {}
-    record CreateRequest(@NotNull @Pattern(regexp = "sync") String mode,
+    record TeenInput(@Size(max = 12) String nickname,
+                     @NotNull @Pattern(regexp = "speaker|listener") String role) {}
+    record CreateRequest(@NotNull @Pattern(regexp = "sync|solo|teen|async") String mode,
                          @NotNull @Size(min = 8, max = 100) String createKey,
                          Integer durationSeconds, @Pattern(regexp = "auditory|keywords") String retellStyle,
-                         @Size(max = 80) String topic) {}
+                         @Size(max = 80) String topic, @Valid TeenInput teen) {}
     record InviteRequest(@NotNull @Pattern(regexp = "listener|observer") String role,
                          @NotNull @Min(5) @Max(10080) Integer minutes,
                          @NotNull @Min(1) @Max(10) Integer maxUses,
@@ -58,17 +63,28 @@ class RoomController {
     @PostMapping("/api/sessions/anonymous")
     ResponseEntity<SessionService.Session> session(@RequestHeader(value = "Origin", required = false) String from,
                                                    @CookieValue(value = SESSION, required = false) String token,
-                                                   @Valid @RequestBody SessionRequest request) {
+                                                   @RequestBody JsonNode request) {
         checkOrigin(from);
-        var current = sessions.find(token);
-        if (current != null && request.nickname() == null) {
-            return ResponseEntity.ok().cacheControl(CacheControl.noStore()).body(current);
+        if (!request.isObject() || (request.size() != 0 && (request.size() != 1 || !request.has("nickname")))) {
+            throw invalid();
         }
-        var issued = sessions.create(request.nickname());
+        String nickname = null;
+        if (request.has("nickname")) {
+            var name = request.get("nickname");
+            if (!name.isTextual()) throw invalid();
+            var trimmed = NICKNAME.matcher(name.textValue());
+            if (!trimmed.matches()) throw invalid();
+            nickname = trimmed.group(1);
+            if (nickname.length() > 20 || nickname.indexOf('\0') >= 0) throw invalid();
+        }
+        var issued = sessions.open(token, nickname);
+        var response = ResponseEntity.ok().cacheControl(CacheControl.noStore());
+        if (issued.token() == null) return response.body(issued.session());
+        var remaining = Duration.between(Instant.now(), issued.session().expiresAt());
+        long maxAge = remaining.isNegative() ? 0 : remaining.plusNanos(999_999_999).toSeconds();
         var cookie = ResponseCookie.from(SESSION, issued.token()).httpOnly(true).sameSite("Lax").path("/")
-                .secure(origin.startsWith("https://")).maxAge(Duration.ofHours(12)).build();
-        return ResponseEntity.ok().cacheControl(CacheControl.noStore())
-                .header(HttpHeaders.SET_COOKIE, cookie.toString()).body(issued.session());
+                .secure(origin.startsWith("https://")).maxAge(maxAge).build();
+        return response.header(HttpHeaders.SET_COOKIE, cookie.toString()).body(issued.session());
     }
 
     @GetMapping("/api/me")
@@ -86,8 +102,12 @@ class RoomController {
         String style = request.retellStyle() == null ? "auditory" : request.retellStyle();
         String topic = request.topic() == null ? "家庭日常" : request.topic().strip();
         if (topic.isEmpty()) throw invalid();
-        var data = rooms.create(actor, request.createKey(), seconds, style, topic);
-        return ResponseEntity.status(data.inviteToken() == null ? 200 : 201).body(data);
+        var teen = request.teen();
+        if ("teen".equals(request.mode()) != (teen != null)) throw invalid();
+        String nickname = teen == null ? null : teen.nickname() == null || teen.nickname().isBlank() ? "孩子" : teen.nickname().strip();
+        var data = rooms.create(actor, request.createKey(), request.mode(), seconds, style, topic,
+                nickname, teen == null ? null : teen.role());
+        return ResponseEntity.status(data.created() ? 201 : 200).body(data);
     }
 
     @GetMapping("/api/rooms/{roomId}")
@@ -159,6 +179,14 @@ class RoomController {
                                                  @CookieValue(value = SESSION, required = false) String cookie,
                                                  @Valid @RequestBody RestartRequest request) {
         return rooms.restartRecording(roundId.toString(), actor(from, cookie), request.expectedVersion(), request.kind());
+    }
+
+    @PostMapping("/api/rounds/{roundId}/open-message")
+    RoomService.RecordingState openMessage(@PathVariable UUID roundId,
+                                          @RequestHeader(value = "Origin", required = false) String from,
+                                          @CookieValue(value = SESSION, required = false) String cookie,
+                                          @Valid @RequestBody VersionRequest request) {
+        return rooms.openMessage(roundId.toString(), actor(from, cookie), request.expectedVersion());
     }
 
     @PostMapping("/api/rooms/{roomId}/leave")

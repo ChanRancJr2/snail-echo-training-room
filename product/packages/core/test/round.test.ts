@@ -59,6 +59,17 @@ test('revision clears both old confirmations', () => {
   assert.equal(round.issues[0]?.listenerConfirmedRevision, null);
 });
 
+test('speaker and listener independently accept their own advice', () => {
+  const round: Round = { ...newRound({ id: 'r1', roomId: 'room', mode: 'sync', speakerId: 'a', listenerId: 'b' }), stage: 'ADVICE' };
+  expectError(() => apply(round, { type: 'advice-accepted' }, observer), 'FORBIDDEN_ROLE');
+  const listenerAccepted = apply(round, { type: 'advice-accepted' }, listener);
+  assert.equal(listenerAccepted.listenerAdviceAccepted, true);
+  assert.equal(Boolean(listenerAccepted.adviceAccepted), false);
+  const both = apply(listenerAccepted, { type: 'advice-accepted' }, speaker);
+  assert.equal(both.adviceAccepted, true);
+  assert.equal(both.listenerAdviceAccepted, true);
+});
+
 test('version and absolute deadline reject stale or premature advancement', () => {
   let round = newRound({ id: 'r1', roomId: 'room', mode: 'sync', speakerId: 'a', listenerId: 'b' });
   round = apply(round, { type: 'task-set' }, speaker);

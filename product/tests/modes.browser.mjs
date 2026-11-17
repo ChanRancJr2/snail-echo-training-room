@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { chromium } from 'playwright';
+import { loginWithNickname } from './helpers/nickname.mjs';
 
 const origin = process.env.ECHO_PRODUCT_ORIGIN ?? 'http://127.0.0.1:3100';
 const executablePath = process.env.BROWSER_EXECUTABLE ?? (process.platform === 'win32' ? 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe' : undefined);
@@ -11,7 +12,7 @@ async function mobile() {
   const page = await context.newPage();
   page.on('pageerror', error => errors.push(error.message));
   await page.goto(origin);
-  await page.getByText('匿名会话已建立').waitFor();
+  await loginWithNickname(page, '练习者');
   return page;
 }
 
@@ -98,13 +99,25 @@ async function sameDeviceReport(page) {
   await page.getByText('本轮报告已归档。').waitFor();
 }
 
+async function soloReport(page) {
+  await click(page, '请逐条标注');
+  await page.getByText('第 6 步 / 8').waitFor();
+  await click(page, '确认');
+  await page.getByText('第 7 步 / 8').waitFor();
+  await page.getByRole('heading', { name: '本轮建议' }).waitFor();
+  assert.equal(await page.getByRole('heading', { name: '把误解逐条聊清楚' }).count(), 0);
+  await click(page, '归档本轮并查看报告');
+  await page.getByText('第 8 步 / 8').waitFor();
+  await page.getByText('本轮报告已归档。').waitFor();
+  await page.getByRole('button', { name: '再练一轮', exact: true }).waitFor();
+}
+
 try {
   const [asyncHost, asyncGuest, solo, teen] = await Promise.all([mobile(), mobile(), mobile(), mobile()]);
   const asyncRoom = await setup(asyncHost, '异步留言练');
   await express(asyncHost);
   await asyncHost.getByText('留言已送达训练室，等待复述者打开。').waitFor();
   await asyncGuest.goto(`${origin}/#invite=${asyncRoom.inviteToken}`);
-  await click(asyncGuest, '加入');
   await asyncGuest.waitForURL(`${origin}/?room=${asyncRoom.state.id}`);
   const message = await room(asyncGuest);
   assert.equal(message.stage, 'ASYNC_PENDING');
@@ -144,7 +157,7 @@ try {
   await express(solo);
   await click(solo, '确认交棒');
   await record(solo, true);
-  await sameDeviceReport(solo);
+  await soloReport(solo);
   await click(solo, '结束并关闭训练室');
 
   await setup(teen, '亲子同机练', '表达者');

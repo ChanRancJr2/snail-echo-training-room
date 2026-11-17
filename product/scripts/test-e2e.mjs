@@ -42,6 +42,7 @@ try {
     await waitFor(`${origin}/health/ready`, api);
     await run(process.execPath, ['tests/room.browser.mjs']);
     await run(process.execPath, ['tests/modes.browser.mjs']);
+    await run(process.execPath, ['tests/solo-practice.browser.mjs']);
   }
   catch (error) { process.stderr.write(`API exit=${api.exitCode} signal=${api.signalCode}: ${api.recentOutput()}\nWORKER exit=${comparisonWorker.exitCode} signal=${comparisonWorker.signalCode}: ${comparisonWorker.recentOutput()}\n`); throw error; }
 } finally {

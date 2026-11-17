@@ -31,7 +31,7 @@ class PointService {
     record RoundView(String id, String stage, long version, Instant deadlineAt) {}
     record Confirmed(RoundView round, List<PointView> points) {}
     record Transcript(String status, String text, List<Point> candidates) {}
-    private record ActiveRound(RoomMapper.Room room, RoomMapper.Round round) {}
+    private record ActiveRound(RoomMapper.Room room, RoomMapper.Round round, String memberRole) {}
 
     @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
     public Transcript speakerTranscript(String roundId, String actor) {
@@ -53,13 +53,14 @@ class PointService {
         var active = activeRound(roundId, actor, true);
         var round = active.round();
         if (!actor.equals(round.speakerSessionId())) throw new ApiFailure(403, "FORBIDDEN_ROLE");
-        if ("LISTENER_RETELL".equals(round.stage()) && version + 1 == round.version()) {
+        String nextStage = "async".equals(active.room().mode()) ? "ASYNC_PENDING" : "LISTENER_RETELL";
+        if (nextStage.equals(round.stage()) && version + 1 == round.version()) {
             var saved = readPoints(roundId, false);
             if (saved.stream().map(p -> new Point(p.category(), p.text())).toList().equals(input)) {
                 return result(round, saved);
             }
         }
-        if (points.confirm(roundId, version) != 1) throw new ApiFailure(409, "STALE_VERSION");
+        if (points.confirm(roundId, version, nextStage) != 1) throw new ApiFailure(409, "STALE_VERSION");
         var saved = new ArrayList<PointView>(input.size());
         for (var point : input) {
             String id = UUID.randomUUID().toString();
@@ -86,9 +87,12 @@ class PointService {
     public List<PointView> visiblePoints(String roundId, String actor) {
         var active = activeRound(roundId, actor, false);
         var round = active.round();
-        if (actor.equals(round.speakerSessionId())) return readPoints(roundId, false);
-        if (!actor.equals(round.listenerSessionId()) || !"LISTENER_RETELL".equals(round.stage())
-                || !"keywords".equals(active.room().retellStyle()) || !points.keywordsUsed(roundId)) {
+        boolean retelling = "LISTENER_RETELL".equals(round.stage());
+        boolean listening = retelling && actor.equals(round.listenerSessionId());
+        boolean observing = retelling && "observer".equals(active.memberRole());
+        if (!listening && actor.equals(round.speakerSessionId())) return readPoints(roundId, false);
+        if (!"keywords".equals(active.room().retellStyle())
+                || !(observing || listening && points.keywordsUsed(roundId))) {
             throw new ApiFailure(403, "POINTS_HIDDEN");
         }
         return readPoints(roundId, true);
@@ -108,14 +112,13 @@ class PointService {
         String roomId = rooms.roundRoom(roundId);
         if (roomId == null) throw new ApiFailure(404, "ROUND_NOT_FOUND");
         var room = lock ? rooms.lockRoom(roomId) : rooms.room(roomId);
-        if (rooms.members(roomId).stream().noneMatch(member -> actor.equals(member.sessionId()))) {
-            throw new ApiFailure(403, "NOT_ROOM_MEMBER");
-        }
+        var member = rooms.members(roomId).stream().filter(seat -> actor.equals(seat.sessionId()))
+                .findFirst().orElseThrow(() -> new ApiFailure(403, "NOT_ROOM_MEMBER"));
         var round = rooms.latestRound(roomId);
         if (room == null || !"ACTIVE".equals(room.status()) || round == null || !roundId.equals(round.id())) {
             throw new ApiFailure(409, "ROOM_NOT_ACTIVE");
         }
-        return new ActiveRound(room, round);
+        return new ActiveRound(room, round, member.role());
     }
 
     private static Confirmed result(RoomMapper.Round round, List<PointView> saved) {

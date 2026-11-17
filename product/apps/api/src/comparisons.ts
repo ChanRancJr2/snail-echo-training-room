@@ -10,6 +10,7 @@ import { lockActiveRoundRoom } from './round-lock.ts';
 type Sealed = { ciphertext: Buffer; nonce: Buffer; keyRef: string };
 export interface ComparisonView {
   adviceAccepted: boolean;
+  listenerAdviceAccepted: boolean;
   transcripts?: { speaker: string; listener: string };
   report?: { topic: string; focus: string; speaker: string; listener: string; speakerAudioId: string | null; listenerAudioId: string | null; hintLevel: number };
   total: number;
@@ -189,6 +190,7 @@ export class PgComparisonStore {
         speakerAudioId: room.snapshot.speakerAudioId, listenerAudioId: room.snapshot.listenerAudioId };
     }
     return { total: issues.length, complete, accurate, issues, adviceAccepted: room.snapshot.adviceAccepted ?? false,
+      listenerAdviceAccepted: room.snapshot.listenerAdviceAccepted ?? false,
       ...(transcripts ? { transcripts } : {}), ...(report ? { report } : {}) };
   }
 }

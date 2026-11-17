@@ -107,6 +107,16 @@ class S3AudioStorage {
         return key;
     }
 
+    void putMaterialCandidate(String key, String mime, byte[] bytes) {
+        try {
+            client.putObject(r -> r.bucket(bucket).key(key).contentType(mime)
+                    .cacheControl("private, no-store"), RequestBody.fromBytes(bytes));
+        } catch (SdkException failure) {
+            discard(key);
+            throw new ApiFailure(503, "AUDIO_STORAGE_UNAVAILABLE");
+        }
+    }
+
     private byte[] readVerified(AudioMapper.Asset asset, String key) {
         try (var stream = client.getObject(r -> r.bucket(bucket).key(key))) {
             if (!Long.valueOf(asset.byteSize()).equals(stream.response().contentLength())
