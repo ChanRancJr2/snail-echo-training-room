@@ -92,6 +92,17 @@ class RoomController {
         return ResponseEntity.ok().cacheControl(CacheControl.noStore()).body(sessions.require(cookie));
     }
 
+    @PostMapping("/api/sessions/logout")
+    ResponseEntity<Void> logout(@RequestHeader(value = "Origin", required = false) String from,
+                               @CookieValue(value = SESSION, required = false) String token) {
+        checkOrigin(from);
+        sessions.logout(token);
+        var cookie = ResponseCookie.from(SESSION, "").httpOnly(true).sameSite("Lax").path("/")
+                .secure(origin.startsWith("https://")).maxAge(0).build();
+        return ResponseEntity.noContent().cacheControl(CacheControl.noStore())
+                .header(HttpHeaders.SET_COOKIE, cookie.toString()).build();
+    }
+
     @PostMapping("/api/rooms")
     ResponseEntity<RoomService.CreateResult> create(@RequestHeader(value = "Origin", required = false) String from,
                                                     @CookieValue(value = SESSION, required = false) String cookie,

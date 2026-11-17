@@ -32,6 +32,8 @@ const TrainingApp = defineComponent(() => {
   const submitting = ref(false);
   const restoreError = ref(false);
   const error = ref('');
+  const logoutPending = ref(false);
+  const logoutError = ref('');
   const selected = ref<string | null>(null);
   const historyOpen = ref(false);
   const records = ref<RecordSummary[]>([]);
@@ -107,6 +109,23 @@ const TrainingApp = defineComponent(() => {
       inRoom.value = true;
     }
   }
+
+  async function logout() {
+    if (logoutPending.value || !window.confirm('退出后，本次昵称会话将失效。重新输入同一昵称会开启新会话。确定退出吗？')) return;
+    logoutPending.value = true;
+    logoutError.value = '';
+    try {
+      const response = await fetch('/api/sessions/logout', { method: 'POST', credentials: 'same-origin' });
+      if (!response.ok) throw new Error();
+      session.value = null;
+      nickname.value = '';
+      window.scrollTo(0, 0);
+    } catch {
+      logoutError.value = '暂时无法退出，请检查网络后重试。';
+    } finally {
+      logoutPending.value = false;
+    }
+  }
   onMounted(() => {
     window.addEventListener('hashchange', followInvitation);
     void restoreSession();
@@ -133,7 +152,7 @@ const TrainingApp = defineComponent(() => {
   return () => {
     const showHome = session.value && !selected.value && !inRoom.value && !historyOpen.value;
     return <div class="shell">
-      <header class="top"><span class="mark" aria-hidden="true">↗</span><strong>蜗牛回声训练室</strong><span class="status">V1.2</span></header>
+      <header class="top"><span class="mark" aria-hidden="true">↗</span><strong>蜗牛回声训练室</strong><span class="status">V1.2.1</span></header>
       <main>
         {!window.isSecureContext && <p role="alert" class="notice">请通过 HTTPS 打开训练室，才能使用麦克风。</p>}
         {!session.value && <section class="login-screen" aria-labelledby="login-title">
@@ -161,10 +180,14 @@ const TrainingApp = defineComponent(() => {
               selected.value = key;
               window.scrollTo(0, 0);
             }}><strong>{title}</strong><small>{description}</small></button>)}</div>
-            {!javaDemo && <button class="secondary" onClick={openHistory}>复盘记录</button>}</>}
+            {!javaDemo && <button class="secondary" onClick={openHistory}>复盘记录</button>}
+            {javaDemo && <button type="button" class="text-button" disabled={logoutPending.value} onClick={() => void logout()}>
+              {logoutPending.value ? '正在退出…' : '退出登录'}
+            </button>}
+            {logoutError.value && <p role="alert" class="error-text">{logoutError.value}</p>}</>}
           {historyOpen.value && <History records={records.value} status={historyStatus.value} onBack={() => { historyOpen.value = false; }} onDeleted={openHistory} />}
           {selected.value === 'practice' && !inRoom.value
-            ? <SoloPractice ownerId={session.value.id} onExit={() => {
+            ? <SoloPractice onExit={() => {
               selected.value = null;
               window.scrollTo(0, 0);
             }} />

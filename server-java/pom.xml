@@ -10,7 +10,7 @@
   </parent>
   <groupId>io.snailecho</groupId>
   <artifactId>training-room-api</artifactId>
-  <version>1.2.0</version>
+  <version>1.2.1</version>
   <properties>
     <java.version>21</java.version>
     <testcontainers.version>1.21.3</testcontainers.version>
@@ -35,6 +35,13 @@
     <dependency><groupId>org.testcontainers</groupId><artifactId>mysql</artifactId><scope>test</scope></dependency>
   </dependencies>
   <build>
+    <resources>
+      <resource><directory>src/main/resources</directory></resource>
+      <resource>
+        <directory>../product/apps/web/src</directory>
+        <includes><include>practice-materials.json</include></includes>
+      </resource>
+    </resources>
     <plugins>
       <plugin><groupId>org.springframework.boot</groupId><artifactId>spring-boot-maven-plugin</artifactId></plugin>
     </plugins>

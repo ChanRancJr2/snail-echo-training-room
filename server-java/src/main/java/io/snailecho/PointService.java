@@ -1,9 +1,14 @@
 package io.snailecho;
 
+import java.io.UncheckedIOException;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Service;
@@ -18,12 +23,14 @@ class PointService {
     private final PointMapper points;
     private final TranscriptionMapper jobs;
     private final TextVault vault;
+    private final ObjectMapper json;
 
-    PointService(RoomMapper rooms, PointMapper points, TranscriptionMapper jobs, TextVault vault) {
+    PointService(RoomMapper rooms, PointMapper points, TranscriptionMapper jobs, TextVault vault, ObjectMapper json) {
         this.rooms = rooms;
         this.points = points;
         this.jobs = jobs;
         this.vault = vault;
+        this.json = json;
     }
 
     record Point(String category, String text) {}
@@ -43,10 +50,19 @@ class PointService {
         var job = jobs.byId(round.speakerAudioId());
         if (job == null) return new Transcript("failed", null, List.of());
         return switch (job.status()) {
-            case "DONE" -> new Transcript("ready", vault.open("transcript:" + job.audioId(), job.resultCiphertext()), List.of());
+            case "DONE" -> new Transcript("ready", vault.open("transcript:" + job.audioId(), job.resultCiphertext()), candidates(job));
             case "FAILED", "CANCELLED" -> new Transcript("failed", null, List.of());
             default -> new Transcript("pending", null, List.of());
         };
+    }
+
+    private List<Point> candidates(TranscriptionMapper.Job job) {
+        if (job.candidatesCiphertext() == null) return List.of();
+        try {
+            return json.readValue(vault.open("candidates:" + job.audioId(), job.candidatesCiphertext()), new TypeReference<List<Point>>() {});
+        } catch (JsonProcessingException failure) {
+            throw new UncheckedIOException(failure);
+        }
     }
 
     public Confirmed confirm(String roundId, String actor, long version, List<Point> input) {

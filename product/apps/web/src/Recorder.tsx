@@ -27,7 +27,7 @@ export const Recorder = defineComponent({
     maxSeconds: { type: Number, required: true },
     onBegin: { type: Function as PropType<() => Promise<number>>, required: true },
     onCommitted: { type: Function as PropType<() => Promise<void>>, required: true },
-    onLocalSubmit: Function as PropType<(audio: Blob) => void | Promise<void>>,
+    onSubmitRecording: Function as PropType<(audio: Blob) => void | Promise<void>>,
     onCaptureChange: Function as PropType<(active: boolean) => void>,
     onRecordingStarted: Function as PropType<() => void>,
   },
@@ -172,13 +172,14 @@ export const Recorder = defineComponent({
     async function upload() {
       const recording = audio;
       if (!recording || state.value !== 'ready') return;
-      const { roundId, kind, onCommitted, onLocalSubmit } = props;
+      const { roundId, kind, onCommitted, onSubmitRecording } = props;
       const consentToTranscribe = kind === 'listener' && listenerConsent.value;
+      if (kind === 'listener' && !consentToTranscribe) return;
       state.value = 'uploading';
       error.value = '';
       try {
-        if (onLocalSubmit) {
-          await onLocalSubmit(recording);
+        if (onSubmitRecording) {
+          await onSubmitRecording(recording);
           return;
         }
         idempotencyKey ??= newRequestId();
@@ -200,7 +201,7 @@ export const Recorder = defineComponent({
     }
 
     return () => <section class="recorder"><h2>{props.kind === 'speaker' ? '表达录音' : '复述录音'}</h2>
-      <p>最长 {props.maxSeconds} 秒。{props.onLocalSubmit ? '录音在当前页面处理，可暂停、预听或删除重录。' : '录音仅在确认上传后发送；可暂停、预听或删除重录。'}</p>
+      <p>最长 {props.maxSeconds} 秒。录音仅在确认上传后发送；可暂停、预听或删除重录。</p>
       <div class="record-time">{String(Math.floor(seconds.value / 60)).padStart(2, '0')}:{String(seconds.value % 60).padStart(2, '0')}</div>
       {error.value && <p role="alert" class="error-text">{error.value}</p>}
       {state.value === 'idle' && <button class="primary" onClick={() => void begin()}>开始录音</button>}
@@ -210,11 +211,11 @@ export const Recorder = defineComponent({
       {(state.value === 'recording' || state.value === 'paused' || state.value === 'ready') && <button class="secondary" onClick={remove}>删除录音，重新录入</button>}
       {state.value === 'ready' && <>
         <audio controls src={preview.value ?? ''} />
-        {!props.onLocalSubmit && props.kind === 'speaker' && <div class="transcription-choice">确认上传后会自动转写</div>}
-        {!props.onLocalSubmit && props.kind === 'listener' && <label class="transcription-consent"><input type="checkbox" checked={listenerConsent.value} onChange={event => { listenerConsent.value = (event.currentTarget as HTMLInputElement).checked; }} /> 我知晓复述录音提交后会被转写，用于本轮逐条对照。</label>}
-        <button class="primary" disabled={!props.onLocalSubmit && props.kind === 'listener' && !listenerConsent.value} onClick={() => void upload()}>{props.onLocalSubmit ? '确认复述' : '确认上传'}</button>
+        {!props.onSubmitRecording && props.kind === 'speaker' && <div class="transcription-choice">确认上传后会自动转写</div>}
+        {props.kind === 'listener' && <label class="transcription-consent"><input type="checkbox" checked={listenerConsent.value} onChange={event => { listenerConsent.value = (event.currentTarget as HTMLInputElement).checked; }} /> 我知晓复述录音提交后会被转写，用于本轮逐条对照。</label>}
+        <button class="primary" disabled={props.kind === 'listener' && !listenerConsent.value} onClick={() => void upload()}>确认上传</button>
       </>}
-      {state.value === 'uploading' && <p>{props.onLocalSubmit ? '正在确认复述…' : '正在上传并确认，请稍候…'}</p>}
+      {state.value === 'uploading' && <p>正在上传并确认，请稍候…</p>}
       {props.kind === 'speaker' && state.value !== 'ready' && <p>确认上传后自动转写，可在本轮信息点页面查看。</p>}
     </section>;
   },

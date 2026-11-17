@@ -30,6 +30,7 @@ import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
@@ -67,6 +68,10 @@ class RoomFlowTest {
     @Autowired ComparisonMapper comparisonMapper;
     @Autowired ComparisonService comparisonService;
     @Autowired ComparisonWorker comparisonWorker;
+    @Autowired SoloPracticeScoring soloScoring;
+    @Autowired CoachingAdvice coaching;
+    @Autowired TextVault textVault;
+    @Autowired org.springframework.transaction.PlatformTransactionManager transactions;
 
     @BeforeAll static void dependencies() { Startables.deepStart(DATABASE, STORAGE).join(); }
 
@@ -84,6 +89,129 @@ class RoomFlowTest {
         registry.add("echo.processing.master-key", () -> java.util.Base64.getEncoder().encodeToString(new byte[32]));
         registry.add("echo.processing.worker-delay-ms", () -> 3600000);
         registry.add("echo.processing.comparison-delay-ms", () -> 3600000);
+        registry.add("echo.processing.solo-delay-ms", () -> 3600000);
+        registry.add("echo.processing.advice-delay-ms", () -> 3600000);
+    }
+
+    @Test void asyncAdviceRequestsTheMissingRoleAndStoresOnlyEncryptedResults() throws Exception {
+        String scope = "solo:" + UUID.randomUUID();
+        var endpoint = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        var requests = new AtomicInteger();
+        endpoint.createContext("/rewrite", exchange -> {
+            int attempt = requests.incrementAndGet();
+            var payload = JSON.readTree(exchange.getRequestBody());
+            var roles = JSON.readTree(payload.at("/messages/1/content").asText()).path("roles");
+            if (attempt == 2 && !roles.equals(JSON.valueToTree(List.of("speaker")))) {
+                replyAsr(exchange, 400, "", "{}");
+                return;
+            }
+            String role = attempt == 1 ? "listener" : "speaker";
+            String content = JSON.writeValueAsString(Map.of("suggestions", List.of(Map.of(
+                    "role", role, "evidenceId", "point-a", "text", "把周六发报价的时间说清楚。"))));
+            String response = JSON.writeValueAsString(Map.of("choices", List.of(
+                    Map.of("finish_reason", "stop", "message", Map.of("content", content)))));
+            replyAsr(exchange, 200, "20000000", response);
+        });
+        endpoint.start();
+        try (var model = new ArkComparison(HttpClient.newHttpClient(), JSON, URI.create("http://127.0.0.1:" + endpoint.getAddress().getPort() + "/rewrite"),
+                "test-key", "test-model", Duration.ofSeconds(4))) {
+            var service = new CoachingAdvice(database, transactions, textVault, JSON, Optional.of(model));
+            var evidence = List.of(new ArkComparison.CoachingEvidence("point-a", "周六发报价。", "发报价。", "misunderstanding"));
+            service.enqueue(scope, evidence, List.of("speaker", "listener"));
+            assertThat(service.view(scope).status()).isEqualTo("pending");
+            service.run();
+            var result = service.view(scope);
+            assertThat(result.status()).isEqualTo("ready");
+            assertThat(result.suggestions().get("listener").provider()).isEqualTo("ark");
+            assertThat(result.suggestions().get("speaker").provider()).isEqualTo("ark");
+            assertThat(database.queryForObject("SELECT input_data IS NULL FROM rewrite_advice WHERE scope_id=?", Boolean.class, scope)).isTrue();
+            var ciphertext = database.queryForObject("SELECT result_data FROM rewrite_advice WHERE scope_id=?", byte[].class, scope);
+            assertThat(new String(ciphertext, StandardCharsets.UTF_8)).doesNotContain("周六发报价");
+            service.enqueue(scope, evidence, List.of("listener"));
+            service.run();
+            assertThat(service.view(scope)).isEqualTo(result);
+            assertThat(requests.get()).isEqualTo(2);
+            database.update("UPDATE rewrite_advice SET created_at=TIMESTAMPADD(HOUR,-25,CURRENT_TIMESTAMP(6)) WHERE scope_id=?", scope);
+            service.cleanup();
+            assertThat(service.view(scope)).isNull();
+        } finally {
+            endpoint.stop(0);
+        }
+    }
+
+    @Test void soloPracticeRejectsFabricatedReportsAndTextSubmissions() throws Exception {
+        String owner = session();
+        String path = "/api/practice/analysis/" + UUID.randomUUID();
+        assertThat(post(path + "/text", Map.of("materialId", "family", "duration", 30,
+                "transcript", "我没有录音"), owner).statusCode()).isIn(404, 405);
+        assertThat(post("/api/practice/reports", Map.of("id", UUID.randomUUID(), "materialId", "family",
+                "duration", 30, "transcriptSource", "demo", "complete", 3, "accurate", 3,
+                "total", 3, "accepted", false), owner).statusCode()).isEqualTo(405);
+        assertThat(body(get("/api/practice/reports", owner)).size()).isZero();
+    }
+
+    @Test
+    @EnabledIfEnvironmentVariable(named = "ECHO_TEST_FFMPEG", matches = ".+")
+    void soloAudioNormalizesThenUsesReturnedTranscriptAndRemovesTemporaryObject() throws Exception {
+        String cookie = session();
+        String owner = body(get("/api/me", cookie)).path("id").asText();
+        String id = UUID.randomUUID().toString();
+        String path = "/api/practice/analysis/" + id;
+        var submittedUrl = new AtomicReference<URI>();
+        var endpoint = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        endpoint.createContext("/submit", exchange -> {
+            var payload = JSON.readTree(exchange.getRequestBody());
+            submittedUrl.set(URI.create(payload.at("/audio/url").asText()));
+            replyAsr(exchange, 200, "20000000", "{\"task_id\":\"solo-test-job\"}");
+        });
+        endpoint.createContext("/query", exchange -> replyAsr(exchange, 200, "20000000",
+                "{\"result\":{\"text\":\"如果外婆身体允许，再一起吃午饭。\"}}"));
+        endpoint.start();
+        try {
+            var provider = new VolcFileAsr(HTTP, JSON, URI.create("http://127.0.0.1:" + endpoint.getAddress().getPort() + "/"),
+                    "test-key", "test-resource", Duration.ofSeconds(4));
+            var voice = new SoloPracticeAnalysis(database, transactions, textVault, JSON, soloScoring, coaching, Optional.of(objectStorage),
+                    Optional.of(new FfmpegAudio(System.getenv("ECHO_TEST_FFMPEG"), Duration.ofSeconds(10))), Optional.of(provider));
+            var recording = new org.springframework.mock.web.MockMultipartFile("recording", "sample.wav", "audio/wav", sampleWave((short) 40));
+            voice.submitAudio(id, owner, "family", 30, recording);
+            voice.run();
+            var signed = HTTP.send(HttpRequest.newBuilder(submittedUrl.get()).GET().build(), HttpResponse.BodyHandlers.ofByteArray());
+            assertThat(signed.statusCode()).isEqualTo(200);
+            assertThat(AudioFormat.detect(signed.body())).isEqualTo("audio/mpeg");
+            database.update("UPDATE solo_analysis SET next_at=CURRENT_TIMESTAMP(6) WHERE id=?", id);
+            voice.run();
+            var answer = body(get(path, cookie));
+            assertThat(answer.path("status").asText()).isEqualTo("ready");
+            assertThat(answer.path("source").asText()).isEqualTo("asr");
+            assertThat(answer.path("transcript").asText()).contains("身体允许");
+            assertThat(answer.at("/comparison/accurate").asInt()).isEqualTo(1);
+            assertThat(get(path, session()).statusCode()).isEqualTo(404);
+            assertThat(get(path, "").statusCode()).isEqualTo(401);
+            var choices = new java.util.ArrayList<Map<String, String>>();
+            answer.at("/comparison/issues").forEach(issue -> choices.add(Map.of(
+                    "issueId", issue.path("id").asText(), "resolution", "misunderstanding")));
+            assertThat(choices).isNotEmpty();
+            assertThat(post(path + "/advice", Map.of("choices", List.of()), cookie).statusCode()).isEqualTo(400);
+            assertThat(post(path + "/advice", Map.of("choices", choices), session()).statusCode()).isEqualTo(404);
+            var suggestion = body(post(path + "/advice", Map.of("choices", choices), cookie));
+            assertThat(suggestion.path("status").asText()).isEqualTo("ready");
+            assertThat(suggestion.at("/suggestions/speaker").isMissingNode()).isTrue();
+            assertThat(suggestion.at("/suggestions/listener/provider").asText()).isEqualTo("rules");
+            assertThat(suggestion.at("/suggestions/listener/evidenceId").asText()).isEqualTo(choices.get(0).get("issueId"));
+            assertThat(get(path + "/advice", session()).statusCode()).isEqualTo(404);
+            assertThat(post(path + "/archive", Map.of("accepted", false), session())
+                    .statusCode()).isEqualTo(404);
+            assertThat(post(path + "/archive", Map.of("accepted", false), cookie)
+                    .statusCode()).isEqualTo(204);
+            var archived = body(get("/api/practice/reports", cookie)).get(0);
+            assertThat(archived.path("accurate").asInt()).isEqualTo(1);
+            assertThat(archived.path("transcriptSource").asText()).isEqualTo("asr");
+            voice.cleanup();
+            var discarded = HTTP.send(HttpRequest.newBuilder(submittedUrl.get()).GET().build(), HttpResponse.BodyHandlers.discarding());
+            assertThat(discarded.statusCode()).isEqualTo(404);
+        } finally {
+            endpoint.stop(0);
+        }
     }
 
     @Test void onlyOneRoundStartsAfterBothParticipantsAreReady() throws Exception {
@@ -163,6 +291,20 @@ class RoomFlowTest {
         assertThat(reopened.statusCode()).isEqualTo(200);
         assertThat(body(reopened)).isEqualTo(body(first));
         assertThat(reopened.headers().firstValue("set-cookie")).isEmpty();
+    }
+
+    @Test void signedOutNicknameSessionCannotBeReused() throws Exception {
+        var opened = post("/api/sessions/anonymous", Map.of("nickname", "复盘用户"), "");
+        String cookie = opened.headers().firstValue("Set-Cookie").orElseThrow().split(";", 2)[0];
+        String previous = body(opened).path("id").asText();
+        var logout = post("/api/sessions/logout", Map.of(), cookie);
+        assertThat(logout.statusCode()).isEqualTo(204);
+        assertThat(logout.headers().firstValue("Set-Cookie").orElseThrow()).contains("Max-Age=0", "HttpOnly");
+        assertThat(get("/api/me", cookie).statusCode()).isEqualTo(401);
+        assertThat(get("/api/practice/reports", cookie).statusCode()).isEqualTo(401);
+        assertThat(post("/api/sessions/logout", Map.of(), cookie).statusCode()).isEqualTo(204);
+        var reopened = post("/api/sessions/anonymous", Map.of("nickname", "复盘用户"), cookie);
+        assertThat(body(reopened).path("id").asText()).isNotEqualTo(previous);
     }
 
     @Test void nicknameLoginPreservesTheCookieIdentityAndAllowsSharedNicknames() throws Exception {
@@ -717,10 +859,17 @@ class RoomFlowTest {
         var current = queue.claim("mock");
         assertThat(current.audioId()).isEqualTo(id);
         assertThat(current.token()).isNotEqualTo(stale.token());
-        assertThat(queue.complete(stale, "过期结果")).isFalse();
-        assertThat(queue.complete(current, "新结果")).isTrue();
-        var transcript = body(get(fixture.path() + "/speaker-transcript", fixture.speaker()));
+        assertThat(queue.complete(stale, "过期结果", List.of(new PointService.Point("重点", "过期结果")))).isFalse();
+        assertThat(queue.complete(current, "新结果", List.of(new PointService.Point("事件", "新结果")))).isTrue();
+        var transcriptPath = fixture.path() + "/speaker-transcript";
+        var transcript = body(get(transcriptPath, fixture.speaker()));
         assertThat(transcript.get("text").asText()).isEqualTo("新结果");
+        assertThat(transcript.get("candidates").get(0).get("text").asText()).isEqualTo("新结果");
+        assertThat(transcript.get("candidates").get(0).get("category").asText()).isEqualTo("事件");
+        var encrypted = transcriptionJobs.byId(id).candidatesCiphertext();
+        assertThat(encrypted).isNotEmpty();
+        assertThat(new String(encrypted, StandardCharsets.UTF_8)).doesNotContain("新结果");
+        assertThat(get(transcriptPath, fixture.listener()).statusCode()).isEqualTo(403);
 
         var closing = recordingRoom();
         String closingId = uploadForProcessing(closing, "speaker", closing.speaker(), closing.version(), true).get("audioId").asText();
@@ -788,6 +937,7 @@ class RoomFlowTest {
         String vendorId = UUID.randomUUID().toString();
         var submits = new AtomicInteger();
         var queries = new AtomicInteger();
+        var extractions = new AtomicInteger();
         var signedUrl = new AtomicReference<URI>();
         var remote = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         remote.createContext("/submit", exchange -> {
@@ -811,13 +961,26 @@ class RoomFlowTest {
             if (queries.incrementAndGet() == 1) replyAsr(exchange, 200, "20000002", "{}");
             else replyAsr(exchange, 200, "20000000", "{\"result\":{\"text\":\"真实转码路径测试。\"}}");
         });
+        remote.createContext("/ark", exchange -> {
+            extractions.incrementAndGet();
+            var content = uncertain ? "{\"points\":false}" : """
+                    {"points":[{"category":"事件","text":"转码路径测试","sourceQuote":"真实转码路径测试。"}]}
+                    """;
+            try (exchange) {
+                byte[] response = JSON.writeValueAsBytes(Map.of("choices", List.of(
+                        Map.of("finish_reason", "stop", "message", Map.of("content", content)))));
+                exchange.sendResponseHeaders(200, response.length);
+                exchange.getResponseBody().write(response);
+            }
+        });
         remote.start();
-        try {
-            var endpoint = URI.create("http://127.0.0.1:" + remote.getAddress().getPort() + "/");
+        var endpoint = URI.create("http://127.0.0.1:" + remote.getAddress().getPort() + "/");
+        try (var ark = new ArkComparison(HttpClient.newHttpClient(), JSON, endpoint.resolve("ark"),
+                "test-ark", "test-model", Duration.ofSeconds(4))) {
             var converter = new FfmpegAudio(System.getenv("ECHO_TEST_FFMPEG"), Duration.ofSeconds(10));
             var firstWorker = new TranscriptionWorker(queue, Optional.of(new VolcTranscription(queue,
                     objectStorage, converter, new VolcFileAsr(HTTP, JSON, endpoint, "test-key", "test-resource",
-                    Duration.ofSeconds(4)))), "volc");
+                    Duration.ofSeconds(4)), Optional.empty())), "volc");
             makeJobDue(audioId);
             assertThat(queue.claim("volc")).isNull();
             database.update("UPDATE transcription_jobs SET provider = 'volc', attempts = ? WHERE audio_id = ?",
@@ -835,7 +998,7 @@ class RoomFlowTest {
 
             var resumedWorker = new TranscriptionWorker(queue, Optional.of(new VolcTranscription(queue,
                     objectStorage, converter, new VolcFileAsr(HTTP, JSON, endpoint, "test-key", "test-resource",
-                    Duration.ofSeconds(4)))), "volc");
+                    Duration.ofSeconds(4)), Optional.of(ark))), "volc");
             makeJobDue(audioId);
             resumedWorker.runOne();
             assertThat(transcriptionJobs.byId(audioId).status()).isEqualTo("PENDING");
@@ -845,6 +1008,12 @@ class RoomFlowTest {
             assertThat(queries).hasValue(2);
             var transcript = body(get(fixture.path() + "/speaker-transcript", fixture.speaker()));
             assertThat(transcript.get("text").asText()).isEqualTo("真实转码路径测试。");
+            assertThat(extractions).hasValue(1);
+            var candidates = transcript.get("candidates");
+            assertThat(candidates.size()).isEqualTo(uncertain ? 0 : 1);
+            if (!uncertain) {
+                assertThat(candidates.get(0).get("text").asText()).isEqualTo("转码路径测试");
+            }
 
             database.update("UPDATE transcription_jobs SET artifact_cleanup_after = CURRENT_TIMESTAMP(6) WHERE audio_id = ?", audioId);
             cleanup.sweep();

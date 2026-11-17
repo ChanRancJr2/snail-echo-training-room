@@ -69,6 +69,10 @@ public class SessionService {
         return session != null && session.expiresAt().isAfter(Instant.now()) ? session : null;
     }
 
+    void logout(String token) {
+        if (validToken(token)) database.expireSession(hash(token));
+    }
+
     static boolean validToken(String token) {
         return token != null && TOKEN.matcher(token).matches();
     }

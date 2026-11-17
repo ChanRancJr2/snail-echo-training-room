@@ -11,10 +11,10 @@ import org.apache.ibatis.annotations.Update;
 
 @Mapper
 interface TranscriptionMapper {
-    record Job(String audioId, String roundId, String status, int attempts, byte[] resultCiphertext, String provider) {}
+    record Job(String audioId, String roundId, String status, int attempts, byte[] resultCiphertext, String provider, byte[] candidatesCiphertext) {}
     record ProviderProgress(Instant startedAt, String taskId, boolean expired) {}
 
-    String COLUMNS = "audio_id, round_id, status, attempts, result_ciphertext, provider";
+    String COLUMNS = "audio_id, round_id, status, attempts, result_ciphertext, provider, candidates_ciphertext";
     String OWNED = " WHERE audio_id = #{audio} AND status = 'RUNNING' AND lease_token = #{lease}"
             + " AND available_at > CURRENT_TIMESTAMP(6)";
     String ROUND_ACCEPTS_RESULT = """
@@ -48,9 +48,11 @@ interface TranscriptionMapper {
     @Select("SELECT COUNT(*) FROM transcription_jobs" + OWNED)
     int owned(@Param("audio") String audioId, @Param("lease") String lease);
 
-    @Update("UPDATE transcription_jobs SET status = 'DONE', lease_token = NULL, result_ciphertext = #{result}"
+    @Update("UPDATE transcription_jobs SET status = 'DONE', lease_token = NULL, result_ciphertext = #{result},"
+            + " candidates_ciphertext = #{candidates,jdbcType=LONGVARBINARY}"
             + OWNED + " " + ROUND_ACCEPTS_RESULT)
-    int succeed(@Param("audio") String audioId, @Param("lease") String lease, @Param("result") byte[] result);
+    int succeed(@Param("audio") String audioId, @Param("lease") String lease, @Param("result") byte[] result,
+                @Param("candidates") byte[] candidates);
 
     @Update("""
         UPDATE transcription_jobs SET status = IF(attempts >= 3, 'FAILED', 'PENDING'), lease_token = NULL,

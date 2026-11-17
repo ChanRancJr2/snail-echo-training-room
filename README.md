@@ -1,9 +1,9 @@
-# 蜗牛回声训练室V1.2
+# 蜗牛回声训练室V1.2.1
 
-移动优先的语音复述训练室。V1.2 使用 Vue 3 + TypeScript 前端、Java 21 + Spring Boot 后端、MySQL 和私有 S3 兼容对象存储。五种玩法为双人同步练、双座位自练、亲子同机练、异步留言练和单人练习。跨设备参与者通过邀请链接加入。
+移动优先的语音复述训练室。V1.2.1 使用 Vue 3 + TypeScript 前端、Java 21 + Spring Boot 后端、MySQL 和私有 S3 兼容对象存储。五种玩法为双人同步练、双座位自练、亲子同机练、异步留言练和单人练习。跨设备参与者通过邀请链接加入。
 
-- [V1.2 本地运行、五种玩法验收和上线步骤](server-java/README.md)
-- [V1.2 本地验收入口](http://localhost:3121/)
+- [V1.2.1 本地运行、五种玩法验收和上线步骤](server-java/README.md)
+- [V1.2.1 本地验收入口](http://localhost:3121/)
 
 ## 旧版 Node.js Demo 本地运行
 
@@ -47,7 +47,7 @@ Windows 默认使用本机 Microsoft Edge。使用其他 Chromium 浏览器时�
 
 ## 项目目录
 
-V1.2 的 Spring Boot API、数据库迁移和镜像配置在 server-java 下。
+V1.2.1 的 Spring Boot API、数据库迁移和镜像配置在 server-java 下。
 
 - `product/apps/web` 是 Vue 3 + TypeScript 的 H5 前端，使用 Vite 构建。
 - `product/apps/api` 包含 Fastify API、数据库迁移、对象存储和转写 Worker。

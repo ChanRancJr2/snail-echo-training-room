@@ -12,6 +12,7 @@ WORKDIR /build
 COPY server-java/pom.xml ./
 COPY server-java/src/main/ src/main/
 COPY --from=web /build/dist/web/ src/main/resources/static/
+COPY --from=web /build/apps/web/src/practice-materials.json src/main/resources/practice-materials.json
 RUN mvn -B -ntp -Dmaven.test.skip=true package
 
 FROM eclipse-temurin:21-jre-jammy

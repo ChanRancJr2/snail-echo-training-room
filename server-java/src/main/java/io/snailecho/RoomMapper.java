@@ -27,6 +27,9 @@ interface RoomMapper {
     @Select("SELECT id, nickname, expires_at, named FROM anonymous_sessions WHERE token_hash = #{hash}")
     SessionService.Session findSession(String hash);
 
+    @Update("UPDATE anonymous_sessions SET expires_at = CURRENT_TIMESTAMP(6) WHERE token_hash = #{hash} AND expires_at > CURRENT_TIMESTAMP(6)")
+    void expireSession(String hash);
+
     @Update("""
         UPDATE anonymous_sessions SET nickname = #{s.nickname}, expires_at = #{s.expiresAt}, named = TRUE
         WHERE token_hash = #{hash} AND NOT named AND expires_at > CURRENT_TIMESTAMP(6)

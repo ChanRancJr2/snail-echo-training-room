@@ -3,7 +3,6 @@ export interface PracticeMaterial {
   topic: string;
   title: string;
   source: string[];
-  demoRetell: string[];
   keywords: string[];
   checks: { sourceIndex: number; keywords: string[]; tag: string; question: string }[];
   advice: string;
@@ -21,9 +20,8 @@ export interface PracticeComparisonItem {
 
 const normalize = (value: string) => value.normalize('NFKC').replace(/[\p{P}\s]/gu, '').toLowerCase();
 
-export function comparePractice(material: PracticeMaterial, input?: string) {
-  const lines = input === undefined ? material.demoRetell
-    : (input.match(/[^。！？!?；;\n]+[。！？!?；;]?/g) ?? []).map(line => line.trim()).filter(Boolean);
+export function comparePractice(material: PracticeMaterial, input: string) {
+  const lines = (input.match(/[^。！？!?；;\n]+[。！？!?；;]?/g) ?? []).map(line => line.trim()).filter(Boolean);
   const candidates = lines.map(line => ({ line, normalized: normalize(line) }));
   const rows = material.checks.map((check): PracticeComparisonItem => {
     const keywords = check.keywords.map(normalize);

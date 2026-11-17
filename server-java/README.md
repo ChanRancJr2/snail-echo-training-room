@@ -1,13 +1,13 @@
-# 蜗牛回声训练室V1.2
+# 蜗牛回声训练室V1.2.1
 
 Vue 与 Spring Boot 的本地验收入口是 [http://localhost:3121/](http://localhost:3121/)。首页提供双人同步练、双座位自练、亲子同机练、异步留言练和单人练习。
 
 - 双人同步练沿用邀请、准备、观察和同房换位流程。
 - 双座位自练与亲子同机练复用录音、转写、八步核对和报告流程。亲子同机练支持留空昵称建房，下一轮交换孩子与家长的角色。
 - 异步留言练允许表达者直接开局。复述者提前加入时看到等待提示，表达者确认要点后才能打开留言并访问录音。
-- 单人练习在浏览器录音，以示例或手填复述文本作关键词对照。Spring Boot 将练习摘要按登录会话归档到 MySQL。复述文本、澄清内容和未经素材提交授权的录音留在浏览器。
+- 单人练习的玩家担任复述者，表达录音来自素材库。确认同意转写并上传后，服务端以该素材对应的原文和本轮复述录音的实际转写逐条对照。只有成功分析后才可查看及归档成绩。录音转写临时对象在任务结束后清理，服务器按会话归档摘要，素材库候选另行授权。
 
-## V1.2 五种玩法定版流程
+## V1.2.1 五种玩法定版流程
 
 | 玩法 | 开始与复述 | 核对、报告与下一轮 |
 | --- | --- | --- |
@@ -15,7 +15,7 @@ Vue 与 Spring Boot 的本地验收入口是 [http://localhost:3121/](http://loc
 | 双座位自练 | 同一人在两个座位交棒，先表达，再复述。 | 标注确认后直接查看建议和报告，可再练一轮。 |
 | 亲子同机练 | 选择孩子本轮角色，在同一设备交棒。 | 与双座位自练共用八步流程。再练一轮时孩子和家长交换角色。 |
 | 异步留言练 | 开局前显示邀请链接，开始本轮后收起邀请。复述者可提前加入等待，或在表达者确认重点后打开留言。 | 双方逐条核对、查看建议，由表达者归档。 |
-| 单人练习 | 选择素材、听原录音并录制自己的复述。 | 对照并确认差异，建议可接纳一次。报告提供原录音与复述回放，可再练一轮或结束练习。 |
+| 单人练习 | 选择素材，听表达者原录音，录下本人的复述并同意上传分析。 | 对照并确认差异，建议可接纳一次。报告提供原录音与复述回放，可再练一轮或结束练习。 |
 
 报告中的「上传素材库」按录音独立确认。双人同步和异步留言只能确认自己的录音。双座位自练和亲子同机共用登录，每一段都要由录音者自行确认。单人练习仅可提交本人的复述录音。房间录音记录授权，单人复述经授权后存为私有候选。候选材料留待后续处理和发布。
 
@@ -88,7 +88,7 @@ $env:JAVA_TEXT_MASTER_KEY = [Convert]::ToBase64String([Security.Cryptography.Ran
 
 在 `product/` 下设置 `$env:ECHO_JAVA_TEST_PROCESSING = '1'` 后运行 `node tests/java-lobby.browser.mjs`，可经同一个 H5 地址验证从录音上传到双方确认、匿名报告导出和同房再开一轮的完整流程。
 
-验收预览运行时，在 `product/` 下执行以下命令，可复测全部五种玩法。浏览器使用独立会话和模拟麦克风，录音走实际对象存储，转写使用 Mock。
+验收预览运行时，在 `product/` 下执行以下命令，可复测全部五种玩法。浏览器使用独立会话和模拟麦克风。房间玩法走实际对象存储与 Mock 转写，单人浏览器使用受控的后端响应验证无语音、重试、改写建议和报告。单人真实服务验证见 [预发布联调](../deploy/README.md)。
 
 ```powershell
 $env:ECHO_PRODUCT_ORIGIN = 'http://localhost:3121'
@@ -118,11 +118,11 @@ node tests/solo-practice.browser.mjs
 
 [方舟 Chat Completions API](https://docs.volcengine.com/docs/ark/chat-api?lang=zh) · [方舟结构化输出](https://docs.volcengine.com/docs/ark/structured-output-beta?lang=zh)
 
-## V1.2 上线阶段
+## V1.2.1 上线阶段
 
 | 阶段 | 完成条件 |
 | --- | --- |
-| 冻结版本 | 以本页五种玩法作为 V1.2 验收基线。Maven 版本为 1.2.0。将经过本地验收的发布分支推送到 GitHub，通过 PR 审查并保留可追溯提交。 |
+| 冻结版本 | 以本页五种玩法作为 V1.2.1 验收基线。Maven 版本为 1.2.1。将经过本地验收的发布分支推送到 GitHub，通过 PR 审查并保留可追溯提交。 |
 | CI 与镜像 | 本地覆盖五种玩法的浏览器回归和镜像冷启动。GitHub Actions 执行 TypeScript 检查、项目测试、Maven verify 和 Linux 镜像构建。记录发布提交与镜像摘要，预发布和生产使用同一镜像。 |
 | VPS 预发布 | 用独立 Compose 项目、数据库和存储桶。验证 HTTPS、跨设备邀请、iOS Safari 和 Android Chrome 的麦克风、录音与回放、真实转写与语义对照，以及五种玩法完整流程。 |
 | 数据和恢复 | 备份旧数据库、对象存储和加密密钥并验证恢复。确认上线是使用独立的 Java 数据库，还是需要迁移旧版历史记录。演练镜像回滚和必要时恢复数据库。 |
@@ -138,7 +138,7 @@ node tests/solo-practice.browser.mjs
 从仓库根目录构建同源的 H5 与 Java 应用。镜像首页提供五种玩法。
 
 ```sh
-docker build -f server-java/Dockerfile -t echo-java:1.2.0 .
+docker build -f server-java/Dockerfile -t echo-java:1.2.1 .
 docker compose --env-file /path/to/java-runtime.env -f server-java/compose.release.yml config --quiet
 docker compose --env-file /path/to/java-runtime.env -f server-java/compose.release.yml up -d --wait
 ```

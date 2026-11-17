@@ -5,7 +5,6 @@ import { comparePractice, type PracticeMaterial } from '../src/practice-comparis
 const sample: PracticeMaterial = {
   id: 'test', title: '见面安排', topic: '家庭日常', keywords: ['周六', '午饭'],
   source: ['周六先去看外婆。', '外婆身体允许，再一起吃午饭。'],
-  demoRetell: ['周六先看外婆。', '再一起吃午饭。'],
   checks: [
     { sourceIndex: 0, keywords: ['周六', '外婆'], tag: '遗漏重要信息', question: '哪天去看外婆？' },
     { sourceIndex: 1, keywords: ['身体允许', '午饭'], tag: '遗漏关键条件', question: '什么情况下吃午饭？' },

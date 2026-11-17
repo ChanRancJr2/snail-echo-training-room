@@ -1,9 +1,9 @@
 import { computed, defineComponent, h, nextTick, onBeforeUnmount, ref, type PropType } from 'vue';
-import { boundedFetch, newRequestId } from './client.ts';
+import { boundedFetch, newRequestId, type PracticeAdvice } from './client.ts';
 import { Recorder } from './Recorder.tsx';
 import { AudioPlayer } from './AudioPlayer.tsx';
 import { MaterialConsentButton } from './MaterialConsentButton.tsx';
-import { comparePractice } from './practice-comparison.ts';
+import type { PracticeComparisonItem } from './practice-comparison.ts';
 import materials from './practice-materials.json' with { type: 'json' };
 import './solo-practice.css';
 
@@ -12,7 +12,10 @@ const steps = ['单人练习', '先听，再用自己的话说', '先看差异',
 const resolutions = ['真误解', '表达问题', 'AI 误判'] as const;
 const javaBackend = import.meta.env.VITE_ECHO_TARGET === 'java';
 
-type Comparison = ReturnType<typeof comparePractice>;
+type Comparison = { rows: PracticeComparisonItem[]; issues: PracticeComparisonItem[];
+  total: number; complete: number; accurate: number };
+type Analysis = { status: 'pending' | 'ready' | 'failed'; source: 'asr';
+  transcript: string | null; comparison: Comparison | null; provider: string | null; failure: string | null };
 type Issue = Comparison['issues'][number];
 type Resolution = typeof resolutions[number];
 type Review = { resolution: Resolution | ''; note: string };
@@ -39,7 +42,6 @@ export const SoloPractice = defineComponent({
   name: 'SoloPractice',
   props: {
     onExit: { type: Function as PropType<() => void>, required: true },
-    ownerId: String,
   },
   setup(props) {
     const step = ref(1);
@@ -53,8 +55,11 @@ export const SoloPractice = defineComponent({
     const playError = ref('');
     const capturing = ref(false);
     const hintsOpen = ref(false);
-    const input = ref('');
-    const comparedInput = ref('');
+    const analysis = ref<(Analysis & { id: string }) | null>(null);
+    const analysisBusy = ref(false);
+    const analysisError = ref('');
+    let analysisRequest: AbortController | null = null;
+    let attemptId = '';
     const retellPreviewUrl = ref('');
     let retellRecording: Blob | null = null;
     const retellPreview = ref<HTMLAudioElement | null>(null);
@@ -62,18 +67,26 @@ export const SoloPractice = defineComponent({
     const reportListener = ref<HTMLAudioElement | null>(null);
     const retellPlaying = ref(false);
     const retellError = ref('');
-    const result = computed(() => comparePractice(material.value, comparedInput.value || undefined));
+    const result = computed(() => analysis.value?.comparison ?? null);
     const reviews = ref<Record<string, Review>>({});
     const accepted = ref(false);
-    const stored = ref(false);
     const archiving = ref(false);
     const archiveError = ref('');
-    let archiveId = '';
-    const retellLabel = computed(() => comparedInput.value ? '你输入的复述' : '示例复述');
+    const coaching = ref<PracticeAdvice | null>(null);
+    const reviewError = ref('');
+    const reviewBusy = ref(false);
+    let coachingRequest: AbortController | null = null;
+    const retellLabel = '本轮复述转写';
 
     function go(next: number) {
       if (step.value === 3) retellPreview.value?.pause();
-      if (next === 1) clearRetellPreview();
+      if (next <= 2 || next === 6) coachingRequest?.abort();
+      if (next <= 2) {
+        analysisRequest?.abort();
+        analysisRequest = null;
+        analysisBusy.value = false;
+        clearRetellPreview();
+      }
       step.value = next;
       void nextTick(() => {
         window.scrollTo(0, 0);
@@ -111,9 +124,14 @@ export const SoloPractice = defineComponent({
 
     function submitRetell(audio: Blob) {
       clearRetellPreview();
+      analysis.value = null;
+      analysisError.value = '';
+      attemptId = '';
+      reviews.value = {};
       retellRecording = audio;
       retellPreviewUrl.value = URL.createObjectURL(audio);
       go(3);
+      void analyze();
     }
 
     function clearRetellPreview() {
@@ -138,68 +156,128 @@ export const SoloPractice = defineComponent({
       }
     }
 
-    function submitReviews(event: SubmitEvent) {
+    async function analyze() {
+      if (analysisBusy.value || !retellRecording) return;
+      const request = new AbortController();
+      analysisRequest = request;
+      analysisBusy.value = true;
+      analysisError.value = '';
+      attemptId ||= newRequestId().replace(/^(.{8})(.{4})(.{4})(.{4})(.{12})$/, '$1-$2-$3-$4-$5');
+      const id = attemptId;
+      const path = `/api/practice/analysis/${id}`;
+      try {
+        const data = new FormData();
+        data.append('materialId', material.value.id);
+        data.append('duration', String(duration.value));
+        data.append('consent', 'true');
+        data.append('recording', retellRecording, 'retell');
+        const submitted = await boundedFetch(path + '/audio', { method: 'POST', body: data, signal: request.signal }, 35000);
+        if (!submitted.ok) {
+          if (submitted.status === 429) throw new Error('分析暂时繁忙，请稍后重试。');
+          throw new Error('暂时无法开始转写，请重试或重新录音。');
+        }
+        const deadline = Date.now() + 255000;
+        while (!request.signal.aborted && Date.now() < deadline) {
+          const response = await boundedFetch(path, { signal: request.signal });
+          if (!response.ok) throw new Error('暂时无法读取分析结果，请稍后重试。');
+          const job = await response.json() as Analysis;
+          if (request.signal.aborted) return;
+          if (job.status === 'failed') {
+            attemptId = '';
+            throw new Error(job.failure === 'NO_SPEECH' ? '未识别到清晰语音，请重新录音。' : '本轮分析未完成，请重试或重新录音。');
+          }
+          if (job.status === 'ready' && job.source === 'asr' && job.comparison && job.transcript) {
+            analysis.value = { ...job, id };
+            reviews.value = {};
+            return;
+          }
+          await new Promise(resolve => window.setTimeout(resolve, 2000));
+        }
+        throw new Error('分析超时，请稍后重试。');
+      } catch (error) {
+        if (!request.signal.aborted) analysisError.value = error instanceof Error ? error.message : '分析暂时不可用。';
+      } finally {
+        if (analysisRequest === request) {
+          analysisRequest = null;
+          analysisBusy.value = false;
+        }
+      }
+    }
+
+    async function submitReviews(event: SubmitEvent) {
       event.preventDefault();
-      if (result.value.issues.every(item => reviewFor(item.id).resolution)) go(5);
+      const finished = analysis.value;
+      const issues = result.value?.issues;
+      if (!finished || !issues || !issues.every(item => reviewFor(item.id).resolution) || reviewBusy.value) return;
+      const codes = { '真误解': 'misunderstanding', '表达问题': 'expression', 'AI 误判': 'ai_error' } as const;
+      const choices = issues.map(item => ({ issueId: item.id, resolution: codes[reviewFor(item.id).resolution as Resolution] }));
+      const controller = new AbortController();
+      coachingRequest = controller;
+      reviewBusy.value = true;
+      reviewError.value = '';
+      const path = `/api/practice/analysis/${finished.id}/advice`;
+      try {
+        const submitted = await boundedFetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ choices }), signal: controller.signal });
+        if (!submitted.ok) throw new Error();
+        coaching.value = await submitted.json() as PracticeAdvice;
+        if (controller.signal.aborted) return;
+        go(5);
+        const deadline = Date.now() + 125000;
+        while (!controller.signal.aborted && coaching.value?.status === 'pending' && Date.now() < deadline) {
+          await new Promise(resolve => window.setTimeout(resolve, 2200));
+          if (controller.signal.aborted) return;
+          const response = await boundedFetch(path, { signal: controller.signal });
+          if (!response.ok) throw new Error();
+          coaching.value = await response.json() as PracticeAdvice;
+        }
+        if (coaching.value?.status === 'pending') reviewError.value = '改写建议尚未完成，可以先归档。';
+      } catch {
+        if (!controller.signal.aborted) reviewError.value = '暂时无法读取改写建议，请稍后重试。';
+      } finally {
+        if (coachingRequest === controller) {
+          coachingRequest = null;
+          reviewBusy.value = false;
+        }
+      }
     }
 
     async function archive() {
-      if (archiving.value) return;
-      archiveId ||= newRequestId();
-      const report = {
-        date: new Date().toISOString(),
-        title: material.value.title,
-        topic: material.value.topic,
-        duration: duration.value,
-        comparison: result.value,
-        transcriptSource: comparedInput.value ? 'manual' : 'demo',
-        reviews: reviews.value,
-        advice: material.value.advice,
-        accepted: accepted.value,
-      };
-      if (javaBackend) {
-        archiving.value = true;
-        archiveError.value = '';
-        try {
-          const response = await boundedFetch('/api/practice/reports', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              id: archiveId, materialId: material.value.id, duration: report.duration, transcriptSource: report.transcriptSource,
-              complete: report.comparison.complete, accurate: report.comparison.accurate, total: report.comparison.total, accepted: report.accepted,
-            }),
-          });
-          if (!response.ok) throw new Error('archive_failed');
-        } catch {
-          archiveError.value = '归档失败，请重试。';
-          return;
-        } finally {
-          archiving.value = false;
-        }
-      }
+      const finished = analysis.value;
+      if (archiving.value || !finished?.comparison) return;
+      archiving.value = true;
+      archiveError.value = '';
       try {
-        localStorage.setItem(`echo:solo-report:${props.ownerId ?? 'local'}:${archiveId}`, JSON.stringify(report));
-        stored.value = true;
+        const response = await boundedFetch(`/api/practice/analysis/${finished.id}/archive`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ accepted: accepted.value }),
+        });
+        if (!response.ok) throw new Error('archive_failed');
+        go(6);
       } catch {
-        stored.value = false;
+        archiveError.value = '归档失败，请重试。';
+      } finally {
+        archiving.value = false;
       }
-      go(6);
     }
 
     function start() {
       playback.value = 'new';
       hintsOpen.value = false;
       playError.value = '';
-      input.value = '';
-      comparedInput.value = '';
+      analysis.value = null;
+      analysisError.value = '';
       reviews.value = {};
       accepted.value = false;
-      stored.value = false;
-      archiveId = '';
       archiveError.value = '';
+      coaching.value = null;
+      reviewError.value = '';
       go(2);
     }
 
     onBeforeUnmount(() => {
+      analysisRequest?.abort();
+      coachingRequest?.abort();
       sample.value?.pause();
       clearRetellPreview();
     });
@@ -243,26 +321,37 @@ export const SoloPractice = defineComponent({
         <div class="card">
           <Recorder roundId={`solo-${current.id}`} kind="listener" version={1} maxSeconds={duration.value}
             onCaptureChange={captureChanged} onBegin={async () => { captureChanged(true); return 1; }}
-            onCommitted={async () => {}} onLocalSubmit={submitRetell} />
+            onCommitted={async () => {}} onSubmitRecording={submitRetell} />
         </div>
       </div>;
     }
 
     function comparison() {
-      const { issues, rows } = result.value;
+      const completed = result.value;
+      const current = analysis.value;
       return <section class="card comparison-view">
-        <p class="notice">{comparedInput.value ? '当前结果使用你输入的复述，按关键词对照。' : '当前结果使用预置的示例复述。你也可以输入自己的复述文本进行对照。'}</p>
-        {comparisonMetrics(result.value)}
-        <h2 class="solo-subheading">{issues.length ? '有问题的要点 · 逐条对照' : '要点逐条对照'}</h2>
-        {(issues.length ? issues : rows).map((item, index) => <details class="solo-issue" key={item.id}>
-          <summary>{index + 1}. {item.tag || '已对照'} · {item.original}</summary>
-          {pairedText(item, retellLabel.value)}
-          {item.question && <p>可澄清：{item.question}</p>}
-        </details>)}
+        {!completed && <div class="solo-transcript">
+          <p>结果根据素材库的原录音和你本轮的复述录音生成。</p>
+          {!analysisBusy.value && <button type="button" class="secondary" onClick={() => void analyze()}>重试分析</button>}
+          <button type="button" class="text-button" disabled={analysisBusy.value} onClick={() => go(2)}>重新录音</button>
+        </div>}
+        {analysisBusy.value && <p role="status">正在分析本轮复述，请稍候…</p>}
+        {analysisError.value && <p class="error-text" role="alert">{analysisError.value}</p>}
+        {completed && current && <>
+          <p class="notice">{current.provider === 'ark' ? '方舟对照了原录音要点与本轮复述转写。'
+            : current.provider === 'ark_partial' ? '方舟与关键词规则共同对照了本轮复述。' : '本轮复述已转写，使用关键词规则完成对照。'}</p>
+          {comparisonMetrics(completed)}
+          <h2 class="solo-subheading">{completed.issues.length ? '有问题的要点 · 逐条对照' : '要点逐条对照'}</h2>
+          {(completed.issues.length ? completed.issues : completed.rows).map((item, index) => <details class="solo-issue" key={item.id}>
+            <summary>{index + 1}. {item.tag || '已对照'} · {item.original}</summary>
+            {pairedText(item, retellLabel)}
+            {item.question && <p>可澄清：{item.question}</p>}
+          </details>)}
+        </>}
         <details class="solo-transcript" onToggle={event => {
           if (!(event.currentTarget as HTMLDetailsElement).open) retellPreview.value?.pause();
         }}>
-          <summary>用自己的复述文本重新对照</summary>
+          <summary>回听本轮复述</summary>
           {retellPreviewUrl.value && <>
             <audio ref={retellPreview} src={retellPreviewUrl.value} preload="none" hidden
               onPlay={event => {
@@ -276,24 +365,20 @@ export const SoloPractice = defineComponent({
             </button>
             {retellError.value && <p class="error-text" role="alert">{retellError.value}</p>}
           </>}
-          <form onSubmit={event => { event.preventDefault(); comparedInput.value = input.value.trim(); }}>
-            <label for="solo-transcript">复述文本</label>
-            <textarea id="solo-transcript" rows={4} maxlength={2500} value={input.value}
-              onInput={event => { input.value = (event.currentTarget as HTMLTextAreaElement).value; }} />
-            <button type="submit" class="secondary" disabled={comparedInput.value === input.value.trim()}>更新对照</button>
-          </form>
+          {current?.transcript && <p>{current.transcript}</p>}
         </details>
-        <button type="button" class="primary" onClick={() => go(4)}>确认</button>
+        {completed && <button type="button" class="primary" onClick={() => go(4)}>确认</button>}
       </section>;
     }
 
     function review() {
+      if (!result.value) return null;
       const { issues } = result.value;
       return <form class="card" onSubmit={submitReviews}>
         {!issues.length && <p>本轮没有需要确认的差异。</p>}
         {issues.map((item, index) => <article class="solo-issue" key={item.id}>
           <h2>{index + 1}. {item.tag || '待确认'}</h2>
-          {pairedText(item, retellLabel.value)}
+          {pairedText(item, retellLabel)}
           {item.question && <p>{item.question}</p>}
           <label for={`solo-resolution-${index}`}>结论</label>
           <select id={`solo-resolution-${index}`} required value={reviewFor(item.id).resolution} onChange={event => {
@@ -308,15 +393,19 @@ export const SoloPractice = defineComponent({
             reviews.value[item.id] = { ...reviewFor(item.id), note: (event.currentTarget as HTMLTextAreaElement).value };
           }} />
         </article>)}
-        <button type="submit" class="primary">提交，查看改写建议</button>
+        {reviewError.value && <p role="alert">{reviewError.value}</p>}
+        <button type="submit" class="primary" disabled={reviewBusy.value}>提交，查看改写建议</button>
       </form>;
     }
 
     function advice() {
+      const suggestion = coaching.value?.suggestions.listener;
       return <section class="card comparison-view">
         <h2>给复述者的改写建议</h2>
-        <blockquote>{material.value.advice}</blockquote>
-        <button type="button" class="secondary" disabled={archiving.value || accepted.value} aria-pressed={accepted.value} onClick={() => { accepted.value = true; }}>
+        {suggestion ? <blockquote>{suggestion.text}</blockquote> : <p role="status">正在生成改写建议…</p>}
+        {suggestion?.provider === 'rules' && <p>本条为规则建议。</p>}
+        {reviewError.value && <p role="alert">{reviewError.value}</p>}
+        <button type="button" class="secondary" disabled={archiving.value || accepted.value || !suggestion} aria-pressed={accepted.value} onClick={() => { accepted.value = true; }}>
           {accepted.value ? '已接纳' : '接纳这条建议'}
         </button>
         {archiveError.value && <p role="alert">{archiveError.value}</p>}
@@ -325,26 +414,28 @@ export const SoloPractice = defineComponent({
     }
 
     function report() {
+      const comparison = result.value;
+      if (!comparison) return null;
       const recording = retellRecording;
       return <section class="card">
         <h2>{material.value.title}</h2>
-        <p role="status">{javaBackend ? '本轮练习摘要已归档。' : stored.value ? '本轮已归档到此浏览器。' : '本轮报告已生成。浏览器存储不可用。'}</p>
-        <p>{retellLabel.value}对照 · 复述限时 {duration.value} 秒</p>
+        <p role="status">本轮练习摘要已归档。</p>
+        <p>{retellLabel}对照 · 复述限时 {duration.value} 秒</p>
         <div class="report-media">
           <AudioPlayer src={`/practice-audio/${material.value.id}.mp3`} audioRef={reportSpeaker} label="表达者录音" />
           {retellPreviewUrl.value && h(AudioPlayer, { src: retellPreviewUrl.value, audioRef: reportListener, label: '复述者录音' },
             javaBackend && recording ? {
-              action: () => <MaterialConsentButton label="复述者录音" endpoint={`/api/practice/reports/${archiveId}/material-consent`} recording={recording} />,
+              action: () => <MaterialConsentButton label="复述者录音" endpoint={`/api/practice/reports/${analysis.value?.id}/material-consent`} recording={recording} />,
             } : {})}
         </div>
-        {comparisonMetrics(result.value)}
-        {result.value.issues.map((item, index) => <details class="solo-issue" key={item.id}>
+        {comparisonMetrics(comparison)}
+        {comparison.issues.map((item, index) => <details class="solo-issue" key={item.id}>
           <summary>{index + 1}. {item.tag || '差异'} · {reviewFor(item.id).resolution}</summary>
-          {pairedText(item, retellLabel.value)}
+          {pairedText(item, retellLabel)}
           {reviewFor(item.id).note.trim() && <p>澄清：{reviewFor(item.id).note.trim()}</p>}
         </details>)}
         <p><strong>{accepted.value ? '已接纳改写建议' : '本轮跳过改写建议'}</strong></p>
-        {accepted.value && <p>{material.value.advice}</p>}
+        {accepted.value && <p>{coaching.value?.suggestions.listener?.text}</p>}
         <button type="button" class="primary" onClick={() => go(1)}>再练一轮</button>
       </section>;
     }

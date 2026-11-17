@@ -1,5 +1,5 @@
 import { defineComponent, h, reactive, ref, watch, type Ref } from 'vue';
-import { boundedFetch as fetch } from './client.ts';
+import { boundedFetch as fetch, type PracticeAdvice } from './client.ts';
 import { AudioPlayer } from './AudioPlayer.tsx';
 import { MaterialConsentButton } from './MaterialConsentButton.tsx';
 import { nextPractice } from './flow.ts';
@@ -7,7 +7,7 @@ import { nextPractice } from './flow.ts';
 type Resolution = 'misunderstanding' | 'expression' | 'ai_error';
 type Observation = { tag: string; note: string | null };
 type Item = { id: string; category: string; original: string; speakerQuote: string | null; listenerQuote: string; complete: boolean; accurate: boolean; tag: string | null; clarification: string | null; resolution: Resolution | null; speakerConfirmed: boolean; listenerConfirmed: boolean; listenerNote: string | null; listenerNotes?: string[]; observerTag: string | null; observerNote: string | null; observations?: Observation[] };
-type Result = { total: number; complete: number; accurate: number; excluded?: number; issues: Item[]; adviceAccepted: boolean; listenerAdviceAccepted?: boolean; provider?: 'mock' | 'rules' | 'ark' | 'ark_partial' | 'rules_fallback'; transcripts?: { speaker: string; listener: string }; report?: { topic: string; focus: string; speaker: string; listener: string; speakerAudioId: string | null; listenerAudioId: string | null; hintLevel: number } };
+type Result = { advice?: PracticeAdvice | null; total: number; complete: number; accurate: number; excluded?: number; issues: Item[]; adviceAccepted: boolean; listenerAdviceAccepted?: boolean; provider?: 'mock' | 'rules' | 'ark' | 'ark_partial' | 'rules_fallback'; transcripts?: { speaker: string; listener: string }; report?: { topic: string; focus: string; speaker: string; listener: string; speakerAudioId: string | null; listenerAudioId: string | null; hintLevel: number } };
 const sentences = (text: string) => text.match(/[^。！？!?\n]+[。！？!?]?/g)?.map(value => value.trim()).filter(Boolean) ?? [];
 const tags = ['遗漏重要信息', '理解不到位', '理解偏了', '杜撰信息', '强加信息', '我表达不清', '我言不达意', '语气被误解', '重点被误解', 'AI 误判'];
 const resolutions: [Resolution, string][] = [['misunderstanding', '真误解'], ['expression', '表达问题'], ['ai_error', 'AI 误判']];
@@ -39,13 +39,20 @@ export const ComparisonView = defineComponent((props: ComparisonProps) => {
 
   watch([() => props.roundId, () => props.version, reload], ([roundId, version], _, onCleanup) => {
     const controller = new AbortController();
-    onCleanup(() => controller.abort());
+    let timer: number | undefined;
+    onCleanup(() => {
+      controller.abort();
+      window.clearTimeout(timer);
+    });
     void fetch(`/api/rounds/${roundId}/comparison`, { signal: controller.signal }).then(async response => {
       if (!response.ok) throw new Error('对照结果暂时无法读取');
       return response.json() as Promise<Result>;
     }).then(result => {
       if (controller.signal.aborted) return;
       loadedComparison.value = { roundId, version, result };
+      if (result.advice?.status === 'pending' && props.stage === 'ADVICE') {
+        timer = window.setTimeout(() => { reload.value += 1; }, 2000);
+      }
       draftChoices.value = Object.fromEntries(result.issues.map(item => [item.id, { tag: item.tag ?? '遗漏重要信息', resolution: item.resolution ?? 'misunderstanding' }]));
     }).catch(cause => {
       if (!controller.signal.aborted) requestError.value = cause instanceof Error ? cause.message : '读取失败';
@@ -132,17 +139,22 @@ export const ComparisonView = defineComponent((props: ComparisonProps) => {
     const seats = report ? (anonymous ? ['座位 A', '座位 B'] : [report.speaker, report.listener]) : null;
     const speakerIssue = problems.find(item => item.resolution === 'expression') ?? problems[0];
     const listenerIssue = problems.find(item => item.resolution === 'misunderstanding') ?? problems[0];
+    const speakerAdvice = result.advice?.suggestions.speaker;
+    const listenerAdvice = result.advice?.suggestions.listener;
+    const advicePending = result.advice?.status === 'pending';
     const ownAdviceAccepted = role === 'speaker' ? result.adviceAccepted : result.listenerAdviceAccepted === true;
     if (stage === 'ADVICE') return <section class="comparison-view">
       {error && <p role="alert" class="error-text">{error}</p>}
-      {role !== 'listener' && <><h2>{compactReview ? '本轮建议' : '给表达者的建议'}</h2><blockquote>{speakerIssue
+      {role !== 'listener' && <><h2>{compactReview ? '本轮建议' : '给表达者的建议'}</h2><blockquote>{speakerAdvice?.text ?? (advicePending ? "正在生成建议…" : speakerIssue
         ? `先交代背景或条件，再把这一点单独说清楚：“${speakerIssue.original}”。`
-        : '保持每句话只讲一个主要意思，重要条件单独说明。'}</blockquote></>}
-      {role !== 'speaker' && <><h2>给复述者的建议</h2><blockquote>{listenerIssue
+        : '保持每句话只讲一个主要意思，重要条件单独说明。')}</blockquote>
+        {speakerAdvice?.provider === 'rules' && <p>本条为规则建议。</p>}</>}
+      {role !== 'speaker' && <><h2>给复述者的建议</h2><blockquote>{listenerAdvice?.text ?? (advicePending ? "正在生成建议…" : listenerIssue
         ? `先复述你确定的内容，再向对方核对：“${listenerIssue.original}”，我听得对吗？`
-        : '用自己的话复述，复述后确认是否遗漏时间、条件或因果。'}</blockquote></>}
+        : '用自己的话复述，复述后确认是否遗漏时间、条件或因果。')}</blockquote>
+        {listenerAdvice?.provider === 'rules' && <p>本条为规则建议。</p>}</>}
       {role !== 'speaker' && <p role="status">等待表达者归档本轮。</p>}
-      {role !== 'observer' && <button class="secondary" disabled={busy || ownAdviceAccepted} onClick={() => void send('adopt', {})}>{ownAdviceAccepted ? '已采纳' : '采纳这条建议'}</button>}
+      {role !== 'observer' && <button class="secondary" disabled={busy || ownAdviceAccepted || advicePending} onClick={() => void send('adopt', {})}>{ownAdviceAccepted ? '已采纳' : '采纳这条建议'}</button>}
     </section>;
     return <section class="comparison-view"><p>{isReport ? '本轮报告已归档。' : compactReview && stage === 'MUTUAL_CONFIRM' ? '请确认本轮标注。' : '双方逐条确认最终结论。'}</p>
       {result.provider === 'mock' && <p class="notice">演示对照使用预置转写和文字匹配。</p>}
@@ -156,6 +168,8 @@ export const ComparisonView = defineComponent((props: ComparisonProps) => {
         <p>{seats[0]} / {seats[1]} · 提示级别 {report.hintLevel}</p>
         {!anonymous && report.focus && <p>预标重点 · {report.focus}</p>}
         {ownAdviceAccepted && <p>你已采纳本轮练习建议。</p>}
+        {ownAdviceAccepted && (role === 'speaker' ? speakerAdvice : listenerAdvice) &&
+          <blockquote>{(role === 'speaker' ? speakerAdvice : listenerAdvice)?.text}</blockquote>}
         <p>{practice}</p>
         {!anonymous && <div class="report-media">
           {report.speakerAudioId && reportAudio(report.speakerAudioId, 'speaker', speakerAudio)}

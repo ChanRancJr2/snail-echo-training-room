@@ -10,6 +10,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import com.fasterxml.jackson.databind.JsonNode;
@@ -62,6 +63,33 @@ class ArkComparisonTest {
         assertThat(request[0].at("/messages/1/content").asText()).contains("周六先去看外婆");
     }
 
+    @Test void extractsOnlyGroundedSpeakerPoints() throws IOException {
+        JsonNode[] request = new JsonNode[1];
+        String content = json.writeValueAsString(Map.of("points", List.of(
+                Map.of("category", "时间", "text", "周六上午十点", "sourceQuote", "周六上午十点出发"),
+                Map.of("category", "事件", "text", "看望外婆", "sourceQuote", "去看望外婆"),
+                Map.of("category", "需求", "text", "预订餐厅", "sourceQuote", "预订餐厅"))));
+        respond(200, json.writeValueAsString(Map.of("choices", List.of(
+                Map.of("finish_reason", "stop", "message", Map.of("content", content))))), request, null);
+
+        var extracted = ark.extract("周六上午十点出发，去看望外婆。");
+        assertThat(extracted).containsExactly(new PointService.Point("时间", "周六上午十点"),
+                new PointService.Point("事件", "看望外婆"));
+        assertThat(request[0].at("/messages/1/content").asText()).contains("周六上午十点出发");
+    }
+
+    @Test void rewriteUsesOnlyKnownEvidenceForTheRequestedRoles() throws IOException {
+        var entries = List.of(new ArkComparison.CoachingEvidence("point-a", "先核对价格，再发报价。", "把报价发过去。",
+                "misunderstanding"));
+        String content = json.writeValueAsString(Map.of("suggestions", List.of(
+                Map.of("role", "listener", "evidenceId", "point-a", "text", "复述时先说核对价格，再说发送报价。"),
+                Map.of("role", "speaker", "evidenceId", "invented", "text", "建议增加新的条件。"))));
+        respond(200, json.writeValueAsString(Map.of("choices", List.of(
+                Map.of("finish_reason", "stop", "message", Map.of("content", content))))), null, null);
+        assertThat(ark.rewrite(entries, List.of("speaker", "listener")))
+                .containsOnlyKeys("listener");
+    }
+
     @Test void ignoresAnInventedQuoteAndLeavesMissingPointsForLocalFallback() {
         respond(200, modelResponse(List.of(item("a", true, true, "凭空捏造", ""))), null, null);
         assertThat(ark.compare(points, "周六先去看外婆。")).isEmpty();
@@ -90,6 +118,24 @@ class ArkComparisonTest {
                     assertThat(failure.getMessage()).isEqualTo("ARK_HTTP_FAILED");
                     assertThat(failure.getCause()).isNull();
                 });
+    }
+
+    @Test void directProviderCallsRetryOnceForTemporaryFailuresAndRejectInvalidResponses() {
+        var attempts = new AtomicInteger();
+        String content = modelResponse(List.of(item("a", true, true, "看外婆", "")));
+        server.createContext("/compare", exchange -> {
+            try (exchange) {
+                int attempt = attempts.incrementAndGet();
+                byte[] response = (attempt == 2 ? content : "{}").getBytes(StandardCharsets.UTF_8);
+                exchange.sendResponseHeaders(attempt == 1 ? 503 : 200, response.length);
+                exchange.getResponseBody().write(response);
+            }
+        });
+        assertThat(ArkComparison.retryTransient(() -> ark.compare(points, "看外婆。"))).containsOnlyKeys("a");
+        assertThat(attempts.get()).isEqualTo(2);
+        assertThatThrownBy(() -> ArkComparison.retryTransient(() -> ark.compare(points, "看外婆。")))
+                .isInstanceOf(ArkComparison.Failure.class).hasMessage("ARK_INVALID_RESPONSE");
+        assertThat(attempts.get()).isEqualTo(3);
     }
 
     @Test void rejectsOversizedResponsesBeforeParsingThem() {

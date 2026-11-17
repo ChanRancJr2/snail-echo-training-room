@@ -1,6 +1,11 @@
 package io.snailecho;
 
+import java.io.UncheckedIOException;
+import java.util.List;
 import java.util.UUID;
+
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Service;
@@ -15,12 +20,14 @@ class TranscriptionQueue {
     private final RoomMapper rooms;
     private final AudioMapper audio;
     private final TextVault text;
+    private final ObjectMapper json;
 
-    TranscriptionQueue(TranscriptionMapper jobs, RoomMapper rooms, AudioMapper audio, TextVault text) {
+    TranscriptionQueue(TranscriptionMapper jobs, RoomMapper rooms, AudioMapper audio, TextVault text, ObjectMapper json) {
         this.jobs = jobs;
         this.rooms = rooms;
         this.audio = audio;
         this.text = text;
+        this.json = json;
     }
 
     record Lease(String audioId, String roundId, String token) {}
@@ -38,8 +45,21 @@ class TranscriptionQueue {
     }
 
     public boolean complete(Lease lease, String transcript) {
+        return complete(lease, transcript, List.of());
+    }
+
+    public boolean complete(Lease lease, String transcript, List<PointService.Point> candidates) {
         if (!stillRelevant(lease)) return cancel(lease);
-        return jobs.succeed(lease.audioId(), lease.token(), text.seal("transcript:" + lease.audioId(), transcript)) == 1;
+        String audioId = lease.audioId();
+        byte[] candidateData = null;
+        if (!candidates.isEmpty()) {
+            try {
+                candidateData = text.seal("candidates:" + audioId, json.writeValueAsString(candidates));
+            } catch (JsonProcessingException failure) {
+                throw new UncheckedIOException(failure);
+            }
+        }
+        return jobs.succeed(audioId, lease.token(), text.seal("transcript:" + audioId, transcript), candidateData) == 1;
     }
 
     private boolean stillRelevant(Lease lease) {

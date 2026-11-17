@@ -87,10 +87,14 @@ class S3AudioStorage {
         try {
             client.putObject(r -> r.bucket(bucket).key(key).contentType("audio/mpeg")
                     .cacheControl("private, no-store"), RequestBody.fromBytes(mp3));
-            return downloadUrl(key, Duration.ofMinutes(3));
+            return asrDownloadUrl(key);
         } catch (SdkException failure) {
             throw new AsrFailure("ASR_STORAGE_UNAVAILABLE", true);
         }
+    }
+
+    String asrDownloadUrl(String key) {
+        return downloadUrl(key, Duration.ofMinutes(3));
     }
 
     String seal(AudioMapper.Asset asset) {

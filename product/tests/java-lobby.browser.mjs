@@ -244,6 +244,13 @@ try {
   const second = await round(b, a);
   assert.notEqual(first.id, second.id);
   assert.notEqual(first.roundId, second.roundId);
+  const account = await (await a.request.get(`${origin}/api/me`)).json();
+  a.once('dialog', dialog => dialog.accept());
+  await a.getByRole('button', { name: '退出登录', exact: true }).click();
+  await a.getByRole('heading', { name: '昵称登录', exact: true }).waitFor();
+  assert.equal((await a.request.get(`${origin}/api/me`)).status(), 401);
+  await loginWithNickname(a, account.nickname);
+  assert.notEqual((await (await a.request.get(`${origin}/api/me`)).json()).id, account.id);
   console.log('Three Java browser sessions passed: startup, reload, recording, re-recording and reversed roles in a fresh room.');
   if (verifyUpload) console.log('Both browser recordings reached confirmed storage and authorized range playback.');
   if (verifyProcessing) console.log('Both practice rooms passed Mock transcription, comparison, mutual confirmation, anonymous export and same-room restart.');

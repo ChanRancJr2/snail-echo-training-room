@@ -89,7 +89,8 @@ class ComparisonService {
     record Report(String topic, String focus, String speaker, String listener, String speakerAudioId,
                   String listenerAudioId, int hintLevel) {}
     record View(int total, long complete, long accurate, List<Issue> issues, boolean adviceAccepted,
-                Transcripts transcripts, Report report, String provider, int excluded, boolean listenerAdviceAccepted) {}
+                Transcripts transcripts, Report report, String provider, int excluded, boolean listenerAdviceAccepted,
+                CoachingAdvice.View advice) {}
     record Practice(long complete, int total) {}
     record Updated(String id, String stage, long version) {}
     record LeasedComparison(ComparisonMapper.Candidate candidate, String token, List<ArkComparison.Point> points,
@@ -103,9 +104,10 @@ class ComparisonService {
     private final ComparisonMapper comparisons;
     private final TextVault vault;
     private final ObjectMapper json;
+    private final CoachingAdvice advice;
 
     ComparisonService(RoomMapper rooms, AudioMapper audio, PointMapper points, TranscriptionMapper transcripts,
-                      ComparisonMapper comparisons, TextVault vault, ObjectMapper json) {
+                      ComparisonMapper comparisons, TextVault vault, ObjectMapper json, CoachingAdvice advice) {
         this.rooms = rooms;
         this.audio = audio;
         this.points = points;
@@ -113,6 +115,7 @@ class ComparisonService {
         this.comparisons = comparisons;
         this.vault = vault;
         this.json = json;
+        this.advice = advice;
     }
 
     public LeasedComparison prepare(ComparisonMapper.Candidate candidate, boolean useArk, boolean providerSlot) {
@@ -266,9 +269,14 @@ class ComparisonService {
             report = new Report(access.room().topic(), details.focus(), details.speaker(), details.listener(),
                     round.speakerAudioId(), round.listenerAudioId(), details.hintLevel());
         }
+        var coaching = archived || "ADVICE".equals(round.stage()) ? advice.view("room:" + id) : null;
+        if (coaching != null && !"observer".equals(access.role())) {
+            var own = coaching.suggestions().get(access.role());
+            coaching = new CoachingAdvice.View(coaching.status(), own == null ? Map.of() : Map.of(access.role(), own));
+        }
         return new View(scored.size(), complete, accurate, items.stream().map(Issue::new).toList(),
                 review.adviceAccepted(), texts, report, review.provider() == null ? "mock" : review.provider(),
-                items.size() - scored.size(), review.listenerAdviceAccepted());
+                items.size() - scored.size(), review.listenerAdviceAccepted(), coaching);
     }
 
     private static boolean countsInResults(Item item) {
@@ -383,6 +391,13 @@ class ComparisonService {
     private Updated persist(Access access, Review review, String stage) {
         var round = access.round();
         comparisons.save(round.id(), seal(round.id(), review));
+        if ("ADVICE".equals(stage) && !"ADVICE".equals(round.stage())) {
+            var evidence = review.items().stream().filter(Item::problem).filter(ComparisonService::countsInResults)
+                    .filter(item -> !"ai_error".equals(item.feedback().resolution()))
+                    .map(item -> new ArkComparison.CoachingEvidence(item.id(), item.original(), item.listenerQuote(),
+                            item.feedback().resolution())).toList();
+            advice.enqueue("room:" + round.id(), evidence, List.of("speaker", "listener"));
+        }
         advance(round, stage);
         rooms.advanceVersion(access.room().id());
         return new Updated(round.id(), stage, round.version() + 1);
