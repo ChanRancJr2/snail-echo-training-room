@@ -155,7 +155,9 @@ async function asyncRoom(host, guest, early) {
     await click(host, '提交标注，邀请双方确认');
     await click(host, '确认这一条');
     await guest.getByText('表达者：已确认 · 复述者：待确认', { exact: true }).waitFor();
+    const confirmed = guest.waitForResponse(response => response.url().endsWith('/review/confirm'));
     await click(guest, '确认这一条');
+    assert.equal((await confirmed).status(), 200, 'the displayed confirmation and command must share a version');
     await host.getByText('表达者：已确认 · 复述者：已确认', { exact: true }).waitFor();
     await click(host, '表达者提交，查看改写建议');
     await click(host, '归档本轮并查看报告');

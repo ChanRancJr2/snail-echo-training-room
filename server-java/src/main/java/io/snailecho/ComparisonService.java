@@ -90,7 +90,7 @@ class ComparisonService {
                   String listenerAudioId, int hintLevel) {}
     record View(int total, long complete, long accurate, List<Issue> issues, boolean adviceAccepted,
                 Transcripts transcripts, Report report, String provider, int excluded, boolean listenerAdviceAccepted,
-                CoachingAdvice.View advice) {}
+                CoachingAdvice.View advice, long version) {}
     record Practice(long complete, int total) {}
     record Updated(String id, String stage, long version) {}
     record LeasedComparison(ComparisonMapper.Candidate candidate, String token, List<ArkComparison.Point> points,
@@ -276,7 +276,7 @@ class ComparisonService {
         }
         return new View(scored.size(), complete, accurate, items.stream().map(Issue::new).toList(),
                 review.adviceAccepted(), texts, report, review.provider() == null ? "mock" : review.provider(),
-                items.size() - scored.size(), review.listenerAdviceAccepted(), coaching);
+                items.size() - scored.size(), review.listenerAdviceAccepted(), coaching, round.version());
     }
 
     private static boolean countsInResults(Item item) {

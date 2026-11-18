@@ -46,9 +46,17 @@ export const ComparisonView = defineComponent((props: ComparisonProps) => {
     });
     void fetch(`/api/rounds/${roundId}/comparison`, { signal: controller.signal }).then(async response => {
       if (!response.ok) throw new Error('对照结果暂时无法读取');
-      return response.json() as Promise<Result>;
-    }).then(result => {
+      return response.json() as Promise<Result & { version?: number }>;
+    }).then(async result => {
       if (controller.signal.aborted) return;
+      // Room polling and comparison reads are separate snapshots. Never let a newer
+      // result supply confirmation labels for an older optimistic-lock version.
+      if (javaBackend && result.version !== version) {
+        loadedComparison.value = null;
+        await props.onChanged();
+        if (!controller.signal.aborted) timer = window.setTimeout(() => { reload.value += 1; }, 250);
+        return;
+      }
       loadedComparison.value = { roundId, version, result };
       if (result.advice?.status === 'pending' && props.stage === 'ADVICE') {
         timer = window.setTimeout(() => { reload.value += 1; }, 2000);

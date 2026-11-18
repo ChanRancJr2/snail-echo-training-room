@@ -93,6 +93,7 @@ jobs:
           (
             cd product
             node tests/java-lobby.browser.mjs
+            node tests/comparison-version.browser.mjs
             node tests/java-modes.browser.mjs
             node tests/solo-practice.browser.mjs
           )

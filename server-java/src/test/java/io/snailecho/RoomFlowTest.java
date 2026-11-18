@@ -602,6 +602,7 @@ class RoomFlowTest {
         assertThat(comparison.at("/issues/0/listenerQuote").asText()).contains("讨论聚餐安排");
         String issue = comparison.at("/issues/0/id").asText();
         long reviewVersion = listener.at("/round/version").asLong() + 1;
+        assertThat(comparison.at("/version").asLong()).isEqualTo(reviewVersion);
         var label = Map.of("expectedVersion", reviewVersion, "labels", java.util.List.of(
                 Map.of("issueId", issue, "tag", "理解偏了", "resolution", "misunderstanding")));
         String review = path + "/review/";
@@ -618,6 +619,7 @@ class RoomFlowTest {
         assertThat(post(review + "clarify", Map.of("expectedVersion", reviewVersion, "issueId", issue,
                 "note", "没有说清聚餐的前提"), fixture.listener()).statusCode()).isEqualTo(200);
         var clarified = body(get(path + "/comparison", fixture.speaker()));
+        assertThat(clarified.at("/version").asLong()).isEqualTo(reviewVersion + 1);
         assertThat(clarified.at("/issues/0/speakerConfirmed").asBoolean()).isFalse();
         assertThat(clarified.at("/issues/0/listenerNote").asText()).isEqualTo("没有说清聚餐的前提");
         assertThat(post(review + "clarify", Map.of("expectedVersion", ++reviewVersion, "issueId", issue,
