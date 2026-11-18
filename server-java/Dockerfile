@@ -14,15 +14,17 @@ FROM maven:3.9-eclipse-temurin-21 AS api
 ARG MAVEN_OFFLINE=false
 WORKDIR /build
 COPY server-java/pom.xml ./
+COPY server-java/maven-settings.xml settings.xml
 COPY server-java/src/main/ src/main/
 COPY --from=web /build/dist/web/ src/main/resources/static/
 COPY --from=web /build/apps/web/src/practice-materials.json src/main/resources/practice-materials.json
 RUN --mount=type=cache,from=maven-cache,target=/root/.m2/repository,sharing=locked \
     if [ "$MAVEN_OFFLINE" = true ]; then set -- --offline; else set --; fi; \
-    mvn -B -ntp "$@" -Dmaven.test.skip=true package
+    mvn -B -ntp --settings settings.xml "$@" -Dmaven.test.skip=true package
 
 FROM eclipse-temurin:21-jre-jammy
-RUN timeout 180s apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update \
+RUN sed -i 's|http://archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g;s|http://security.ubuntu.com/ubuntu|https://security.ubuntu.com/ubuntu|g' /etc/apt/sources.list \
+    && timeout 180s apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update \
     && timeout 240s apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 install -y --no-install-recommends ca-certificates ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /opt/echo

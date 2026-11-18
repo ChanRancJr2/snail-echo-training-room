@@ -26,7 +26,7 @@ jobs:
           node-version: '24'
           cache: npm
           cache-dependency-path: product/package-lock.json
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '21'
@@ -57,7 +57,7 @@ jobs:
       - name: Verify Spring Boot with MySQL and object storage
         env:
           ECHO_TEST_FFMPEG: /usr/bin/ffmpeg
-        run: mvn --batch-mode --no-transfer-progress --file server-java/pom.xml verify
+        run: mvn --batch-mode --no-transfer-progress --settings server-java/maven-settings.xml --file server-java/pom.xml verify
       - name: Verify five training modes in Chromium
         timeout-minutes: 10
         env:
