@@ -2,6 +2,8 @@
 
 发布使用 [Vue 与 Spring Boot 部署说明](../server-java/README.md) 中的同源 Docker 镜像、MySQL 和私有对象存储。构建、预发布、真机验收和切换条件见 [整机验证清单](../server-java/PRE-DEVICE-VERIFICATION.md)。
 
+正式地址为 [蜗牛回声训练室 V1.2.1](https://47.239.63.61.sslip.io/)，使用的入口配置见 `Caddyfile.v1.2.1`。实际发布、恢复及清理记录见 [V1.2.1 执行记录](V1.2.1-CUTOVER-REVIEW.md)。
+
 ## 五种玩法真实服务联调
 
 在独立的预发布环境启用火山文件转写与方舟，使用 HTTPS 签名入口传递临时音频。应用验收可在 HTTPS 预发布域名或通过 SSH 转发的本机入口执行。准备一段 30 秒以内、包含可核对短语且刻意遗漏至少一项家庭示例信息的合成中文复述录音。从仓库根目录运行：
