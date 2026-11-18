@@ -1,0 +1,54 @@
+services:
+  api:
+    image: ${ECHO_JAVA_IMAGE:?Set a tested Java image tag}
+    ports:
+      - '127.0.0.1:${ECHO_JAVA_PORT:-3102}:3001'
+    env_file:
+      - ${ECHO_JAVA_ENV_FILE:?Set the path to the Java runtime environment file}
+    environment:
+      JAVA_API_PORT: '3001'
+      JAVA_DB_URL: jdbc:mysql://mysql:3306/echo_java
+      JAVA_DB_USER: echo
+      JAVA_TOOL_OPTIONS: ${ECHO_JAVA_OPTS:--XX:MaxRAMPercentage=45 -XX:+ExitOnOutOfMemoryError}
+    depends_on:
+      mysql:
+        condition: service_healthy
+    restart: unless-stopped
+    mem_limit: ${ECHO_JAVA_MEM_LIMIT:-512m}
+    read_only: true
+    tmpfs:
+      - /tmp:rw,size=128m,mode=1777
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: ['CMD', 'bash', '-ec', 'exec 3<>/dev/tcp/127.0.0.1/3001; printf "GET /health/live HTTP/1.0\r\n\r\n" >&3; read -r status <&3; [[ "$$status" == *" 200 "* ]]']
+      interval: 5s
+      timeout: 3s
+      retries: 24
+  mysql:
+    image: mysql:8.4
+    command:
+      - --performance-schema=OFF
+      - --innodb-buffer-pool-size=64M
+      - --innodb-log-buffer-size=8M
+      - --max-connections=30
+      - --table-open-cache=200
+      - --thread-cache-size=4
+      - --skip-name-resolve
+    environment:
+      MYSQL_DATABASE: echo_java
+      MYSQL_USER: echo
+      MYSQL_PASSWORD: ${JAVA_DB_PASSWORD:?Set the same database password as the Java runtime environment}
+      MYSQL_RANDOM_ROOT_PASSWORD: 'yes'
+    volumes:
+      - java-mysql:/var/lib/mysql
+    healthcheck:
+      test: ['CMD-SHELL', 'mysql --user="$$MYSQL_USER" --password="$$MYSQL_PASSWORD" --database="$$MYSQL_DATABASE" --execute="SELECT 1" >/dev/null 2>&1']
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+    mem_limit: ${ECHO_MYSQL_MEM_LIMIT:-512m}
+
+volumes:
+  java-mysql:

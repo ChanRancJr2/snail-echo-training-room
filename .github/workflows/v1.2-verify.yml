@@ -1,0 +1,113 @@
+name: V1.2.1 verification
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: v121-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: product/package-lock.json
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+          cache-dependency-path: server-java/pom.xml
+      - name: Use the same Maven as the release builder
+        run: |
+          docker pull maven:3.9.16-eclipse-temurin-21
+          task_maven_container=$(docker create maven:3.9.16-eclipse-temurin-21)
+          trap 'docker rm "$task_maven_container" >/dev/null' EXIT
+          docker cp "$task_maven_container:/usr/share/maven" "$RUNNER_TEMP/echo-maven"
+          echo "$RUNNER_TEMP/echo-maven/bin" >> "$GITHUB_PATH"
+          echo "MAVEN_HOME=$RUNNER_TEMP/echo-maven" >> "$GITHUB_ENV"
+          MAVEN_HOME="$RUNNER_TEMP/echo-maven" "$RUNNER_TEMP/echo-maven/bin/mvn" --version
+      - name: Install FFmpeg
+        timeout-minutes: 8
+        run: |
+          # Avoid a slow regional mirror while retaining Ubuntu's signed indexes.
+          if [ -f /etc/apt/apt-mirrors.txt ]; then
+            printf '%s\n' 'https://archive.ubuntu.com/ubuntu/' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+          fi
+          printf 'Acquire::Retries "2";\nAcquire::http::Timeout "20";\nAcquire::https::Timeout "20";\n' | sudo tee /etc/apt/apt.conf.d/80-echo-ci-timeouts >/dev/null
+          if ! command -v ffmpeg >/dev/null; then
+            timeout 180s sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update
+            timeout 240s sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 install -y --no-install-recommends ffmpeg
+          fi
+          ffmpeg -hide_banner -version
+      - name: Verify Vue and shared code
+        working-directory: product
+        env:
+          VITE_ECHO_TARGET: java
+          FFMPEG_PATH: /usr/bin/ffmpeg
+        run: |
+          npm ci
+          npm test
+          npm run build:web
+      - name: Verify Spring Boot with MySQL and object storage
+        env:
+          ECHO_TEST_FFMPEG: /usr/bin/ffmpeg
+        run: mvn --batch-mode --no-transfer-progress --settings server-java/maven-settings.xml --file server-java/pom.xml verify
+      - name: Verify five training modes in Chromium
+        timeout-minutes: 10
+        env:
+          ECHO_PRODUCT_ORIGIN: http://localhost:3121
+          ECHO_JAVA_TEST_PROCESSING: '1'
+          JAVA_API_PORT: '3121'
+          JAVA_PUBLIC_ORIGIN: http://localhost:3121
+          JAVA_DB_URL: jdbc:mysql://127.0.0.1:13306/echo_java
+          JAVA_DB_USER: echo
+          JAVA_STORAGE_ENDPOINT: http://127.0.0.1:18334
+          JAVA_STORAGE_BUCKET: echo-java-private
+          JAVA_STORAGE_ENABLED: 'true'
+          JAVA_PROCESSING_ENABLED: 'true'
+          JAVA_TRANSCRIPTION_MODE: mock
+          JAVA_COMPARISON_MODE: rules
+        run: |
+          export JAVA_DB_PASSWORD="$(openssl rand -hex 24)"
+          export JAVA_STORAGE_ACCESS_KEY="$(openssl rand -hex 12)"
+          export JAVA_STORAGE_SECRET_KEY="$(openssl rand -hex 24)"
+          export JAVA_TEXT_MASTER_KEY="$(openssl rand -base64 32)"
+          compose=(docker compose --file server-java/compose.yml --project-name echo-ci --profile media)
+          trap 'if [[ -n ${api_pid:-} ]]; then kill "$api_pid" 2>/dev/null || true; fi; "${compose[@]}" down --volumes' EXIT
+          (cd product && timeout 300s npx --no-install playwright install --with-deps chromium)
+          "${compose[@]}" up --detach --wait --wait-timeout 90
+          java -jar server-java/target/training-room-api-1.2.1.jar \
+            "--spring.web.resources.static-locations=file:${PWD}/product/dist/web/" > "$RUNNER_TEMP/echo-java.log" 2>&1 &
+          api_pid=$!
+          if ! curl --fail --silent --retry 25 --retry-connrefused --retry-delay 1 \
+            --max-time 3 "$ECHO_PRODUCT_ORIGIN/health/live"; then
+            tail -n 80 "$RUNNER_TEMP/echo-java.log"
+            exit 1
+          fi
+          (
+            cd product
+            node tests/java-lobby.browser.mjs
+            node tests/comparison-version.browser.mjs
+            node tests/java-modes.browser.mjs
+            node tests/solo-practice.browser.mjs
+          )
+      - name: Build the Linux release image
+        run: |
+          docker build --file server-java/Dockerfile --tag echo-java:ci \
+            --build-context maven-cache="$HOME/.m2/repository" \
+            --build-arg MAVEN_OFFLINE=true .

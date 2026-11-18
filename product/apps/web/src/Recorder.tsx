@@ -1,9 +1,11 @@
-import { useEffect, useRef, useState } from 'react';
+import { defineComponent, onBeforeUnmount, onMounted, ref, watch, type PropType } from 'vue';
 import { boundedFetch as fetch, newRequestId } from './client.ts';
 import { captureAudio } from './capture.ts';
 
 type UploadResult = { audioId: string; status: string; uploadUrl: string | null };
 type CommitResult = { audioId: string; status: string; round: { stage: string } };
+type RecorderState = 'idle' | 'starting' | 'recording' | 'paused' | 'finishing' | 'ready' | 'uploading';
+
 const uploadMessages: Record<string, string> = {
   UNSUPPORTED_AUDIO: '这次录音的文件无法识别，请删除后重新录音。',
   INVALID_AUDIO: '录音格式或大小不符合要求，请重新录音。',
@@ -17,131 +19,204 @@ const uploadMessages: Record<string, string> = {
   RATE_LIMITED: '上传操作太频繁，请稍后重试。',
 };
 
-export function Recorder({ roundId, kind, version, maxSeconds, onBegin, onCommitted, onCaptureChange }: { roundId: string; kind: 'speaker' | 'listener'; version: number; maxSeconds: number; onBegin: () => Promise<number>; onCommitted: () => Promise<void>; onCaptureChange?: (active: boolean) => void }) {
-  const capture = useRef<Awaited<ReturnType<typeof captureAudio>> | null>(null);
-  const commitVersion = useRef(version);
-  const elapsed = useRef(0);
-  const resumedAt = useRef<number | null>(null);
-  const finishing = useRef(false);
-  const uploading = useRef(false);
-  const idempotencyKey = useRef<string | null>(null);
-  const [state, setState] = useState<'idle' | 'starting' | 'recording' | 'paused' | 'finishing' | 'ready' | 'uploading'>('idle');
-  const [audio, setAudio] = useState<Blob | null>(null);
-  const [preview, setPreview] = useState<string | null>(null);
-  const [seconds, setSeconds] = useState(0);
-  const [error, setError] = useState('');
-  const [listenerConsent, setListenerConsent] = useState(false);
-  const recordedMs = () => elapsed.current + (resumedAt.current === null ? 0 : performance.now() - resumedAt.current);
-  useEffect(() => {
-    if (state !== 'recording') return;
-    const tick = () => setSeconds(Math.min(maxSeconds, Math.floor(recordedMs() / 1000)));
-    const interval = window.setInterval(tick, 200);
-    const end = window.setTimeout(() => void finish(), Math.max(0, maxSeconds * 1000 - recordedMs()));
-    return () => { window.clearInterval(interval); window.clearTimeout(end); };
-  }, [state, maxSeconds]);
-  const mounted = useRef(false);
-  useEffect(() => {
-    mounted.current = true;
-    return () => {
-      mounted.current = false;
-      capture.current?.close();
-      capture.current = null;
-    };
-  }, []);
-  useEffect(() => () => { if (preview) URL.revokeObjectURL(preview); }, [preview]);
+export const Recorder = defineComponent({
+  props: {
+    roundId: { type: String, required: true },
+    kind: { type: String as PropType<'speaker' | 'listener'>, required: true },
+    version: { type: Number, required: true },
+    maxSeconds: { type: Number, required: true },
+    onBegin: { type: Function as PropType<() => Promise<number>>, required: true },
+    onCommitted: { type: Function as PropType<() => Promise<void>>, required: true },
+    onSubmitRecording: Function as PropType<(audio: Blob) => void | Promise<void>>,
+    onCaptureChange: Function as PropType<(active: boolean) => void>,
+    onRecordingStarted: Function as PropType<() => void>,
+  },
+  setup(props) {
+    let capture: Awaited<ReturnType<typeof captureAudio>> | null = null;
+    let commitVersion = props.version;
+    let elapsed = 0;
+    let resumedAt: number | null = null;
+    let idempotencyKey: string | null = null;
+    let audio: Blob | null = null;
+    let mounted = false;
+    const state = ref<RecorderState>('idle');
+    const preview = ref<string | null>(null);
+    const seconds = ref(0);
+    const error = ref('');
+    const listenerConsent = ref(false);
+    const recordedMs = () => elapsed + (resumedAt === null ? 0 : performance.now() - resumedAt);
 
-  async function begin() {
-    if (state !== 'idle') return;
-    setState('starting');
-    onCaptureChange?.(true);
-    setError('');
-    let context: AudioContext | null = null;
-    let media: MediaStream | undefined;
-    try {
-      if (!navigator.mediaDevices?.getUserMedia) throw new Error('当前浏览器不支持录音，请在系统浏览器中打开邀请链接。');
-      try { context = new AudioContext(); void context.resume().catch(() => undefined); } catch { /* Native recording can still run. */ }
-      media = await navigator.mediaDevices.getUserMedia({ audio: true });
-      if (!mounted.current) return;
-      const next = await captureAudio(media, context);
-      if (!mounted.current) { next.close(); return; }
-      capture.current = next;
-      if (context?.state === 'suspended') void context.resume().catch(() => undefined);
-      commitVersion.current = await onBegin();
-      if (!mounted.current) return;
-      next.start(); elapsed.current = 0; resumedAt.current = performance.now(); setSeconds(0); setState('recording');
-    } catch (cause) {
-      capture.current?.close(); capture.current = null;
-      if (mounted.current) { onCaptureChange?.(false); setError(cause instanceof DOMException ? '无法使用麦克风，请检查浏览器录音权限。' : cause instanceof Error ? cause.message : '无法录音，请重试。'); setState('idle'); }
-    } finally {
-      if (!capture.current) {
-        media?.getTracks().forEach(track => track.stop());
-        if (context && context.state !== 'closed') void context.close().catch(() => undefined);
+    watch([state, () => props.maxSeconds], ([status, maxSeconds], _, onCleanup) => {
+      if (status !== 'recording') return;
+      const tick = () => { seconds.value = Math.min(maxSeconds, Math.floor(recordedMs() / 1000)); };
+      const interval = window.setInterval(tick, 200);
+      const end = window.setTimeout(() => void finish(), Math.max(0, maxSeconds * 1000 - recordedMs()));
+      onCleanup(() => {
+        window.clearInterval(interval);
+        window.clearTimeout(end);
+      });
+    });
+
+    onMounted(() => { mounted = true; });
+    onBeforeUnmount(() => {
+      mounted = false;
+      capture?.close();
+      capture = null;
+      clearPreview();
+    });
+
+    function clearPreview() {
+      if (preview.value) URL.revokeObjectURL(preview.value);
+      preview.value = null;
+    }
+
+    async function begin() {
+      if (state.value !== 'idle') return;
+      const { onBegin, onCaptureChange } = props;
+      state.value = 'starting';
+      onCaptureChange?.(true);
+      error.value = '';
+      let context: AudioContext | null = null;
+      let media: MediaStream | undefined;
+      try {
+        if (!navigator.mediaDevices?.getUserMedia) throw new Error('当前浏览器不支持录音，请在系统浏览器中打开邀请链接。');
+        try { context = new AudioContext(); void context.resume().catch(() => undefined); } catch { /* Native recording can still run. */ }
+        media = await navigator.mediaDevices.getUserMedia({ audio: true });
+        if (!mounted) return;
+        const next = await captureAudio(media, context);
+        if (!mounted) { next.close(); return; }
+        capture = next;
+        if (context?.state === 'suspended') void context.resume().catch(() => undefined);
+        commitVersion = await onBegin();
+        if (!mounted) return;
+        next.start();
+        elapsed = 0;
+        resumedAt = performance.now();
+        seconds.value = 0;
+        state.value = 'recording';
+        props.onRecordingStarted?.();
+      } catch (cause) {
+        capture?.close();
+        capture = null;
+        if (mounted) {
+          onCaptureChange?.(false);
+          error.value = cause instanceof DOMException ? '无法使用麦克风，请检查浏览器录音权限。' : cause instanceof Error ? cause.message : '无法录音，请重试。';
+          state.value = 'idle';
+        }
+      } finally {
+        if (!capture) {
+          media?.getTracks().forEach(track => track.stop());
+          if (context && context.state !== 'closed') void context.close().catch(() => undefined);
+        }
       }
     }
-  }
-  function toggle() {
-    if (!capture.current || finishing.current) return;
-    if (state === 'recording') {
-      capture.current.pause(); elapsed.current = recordedMs(); resumedAt.current = null;
-      setSeconds(Math.min(maxSeconds, Math.floor(elapsed.current / 1000))); setState('paused');
-    } else if (state === 'paused') {
-      capture.current.resume(); resumedAt.current = performance.now(); setState('recording');
-    }
-  }
-  async function finish() {
-    if (!capture.current || finishing.current) return;
-    finishing.current = true;
-    const current = capture.current;
-    elapsed.current = recordedMs(); resumedAt.current = null;
-    setSeconds(Math.min(maxSeconds, Math.floor(elapsed.current / 1000)));
-    setState('finishing');
-    try {
-      const blob = await current.finish(elapsed.current);
-      if (mounted.current && capture.current === current) { setAudio(blob); setPreview(URL.createObjectURL(blob)); setState('ready'); }
-    } catch (cause) {
-      if (mounted.current && capture.current === current) { setError(cause instanceof Error ? cause.message : '录音保存失败，请重录。'); setState('idle'); }
-    } finally {
-      finishing.current = false;
-      if (capture.current === current) { capture.current = null; onCaptureChange?.(false); }
-    }
-  }
-  function remove() {
-    capture.current?.close(); capture.current = null;
-    elapsed.current = 0; resumedAt.current = null;
-    onCaptureChange?.(false);
-    setAudio(null); setPreview(null); setSeconds(0); setState('idle'); setError(''); setListenerConsent(false); idempotencyKey.current = null;
-  }
-  async function upload() {
-    if (!audio || uploading.current) return;
-    uploading.current = true;
-    setState('uploading'); setError('');
-    try {
-      idempotencyKey.current ??= newRequestId();
-      const request = await fetch(`/api/rounds/${roundId}/uploads`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ kind, mimeType: audio.type, byteSize: audio.size, idempotencyKey: idempotencyKey.current }) });
-      const data = await request.json() as UploadResult & { error?: string };
-      if (!request.ok) throw new Error(uploadMessages[data.error ?? ''] ?? '无法申请上传，请重试。');
-      if (data.uploadUrl) {
-        const put = await fetch(data.uploadUrl, { method: 'PUT', headers: { 'Content-Type': audio.type }, body: audio }, 60000);
-        if (!put.ok) throw new Error('录音上传失败，请重试。');
+
+    function toggle() {
+      if (!capture) return;
+      if (state.value === 'recording') {
+        capture.pause();
+        elapsed = recordedMs();
+        resumedAt = null;
+        seconds.value = Math.min(props.maxSeconds, Math.floor(elapsed / 1000));
+        state.value = 'paused';
+      } else if (state.value === 'paused') {
+        capture.resume();
+        resumedAt = performance.now();
+        state.value = 'recording';
       }
-      const commit = await fetch(`/api/rounds/${roundId}/uploads/${data.audioId}/commit`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ expectedVersion: commitVersion.current, transcribe: kind === 'speaker', consentToTranscribe: kind === 'listener' && listenerConsent }) });
-      const result = await commit.json() as CommitResult & { error?: string };
-      if (!commit.ok) throw new Error(uploadMessages[result.error ?? ''] ?? '无法确认上传，请重试。');
-      await onCommitted();
-    } catch (cause) { setError(cause instanceof TypeError || cause instanceof DOMException ? '网络中断或请求超时，录音仍在，请重试上传。' : cause instanceof Error ? cause.message : '上传失败，请重试。'); setState('ready'); }
-    finally { uploading.current = false; }
-  }
-  return <section className="recorder"><h2>{kind === 'speaker' ? '表达录音' : '复述录音'}</h2>
-    <p>最长 {maxSeconds} 秒。录音仅在确认上传后发送；可暂停、预听或删除重录。</p>
-    <div className="record-time">{String(Math.floor(seconds / 60)).padStart(2, '0')}:{String(seconds % 60).padStart(2, '0')}</div>
-    {error && <p role="alert" className="error-text">{error}</p>}
-    {state === 'idle' && <button className="primary" onClick={() => void begin()}>开始录音</button>}
-    {state === 'starting' && <p>正在获取录音权限并同步本轮计时…</p>}
-    {(state === 'recording' || state === 'paused') && <><button className="secondary" onClick={toggle}>{state === 'recording' ? '暂停录音' : '继续录音'}</button><button className="primary" onClick={() => void finish()}>结束录音</button></>}
-    {state === 'finishing' && <p role="status">正在保存这次录音…</p>}
-    {(state === 'recording' || state === 'paused' || state === 'ready') && <button className="secondary" onClick={remove}>删除录音，重新录入</button>}
-    {state === 'ready' && <><audio controls src={preview ?? undefined} />{kind === 'speaker' && <div className="transcription-choice">确认上传后会自动转写</div>}{kind === 'listener' && <label className="transcription-consent"><input type="checkbox" checked={listenerConsent} onChange={event => setListenerConsent(event.target.checked)} /> 我知晓复述录音提交后会被转写，用于本轮逐条对照。</label>}<button className="primary" disabled={kind === 'listener' && !listenerConsent} onClick={() => void upload()}>确认上传</button></>}
-    {state === 'uploading' && <p>正在上传并确认，请稍候…</p>}
-    {kind === 'speaker' && state !== 'ready' && <p>确认上传后自动转写，可在本轮信息点页面查看。</p>}
-  </section>;
-}
+    }
+
+    async function finish() {
+      if (!capture || (state.value !== 'recording' && state.value !== 'paused')) return;
+      const current = capture;
+      const { maxSeconds, onCaptureChange } = props;
+      elapsed = recordedMs();
+      resumedAt = null;
+      seconds.value = Math.min(maxSeconds, Math.floor(elapsed / 1000));
+      state.value = 'finishing';
+      try {
+        const blob = await current.finish(elapsed);
+        if (mounted && capture === current) {
+          audio = blob;
+          preview.value = URL.createObjectURL(blob);
+          state.value = 'ready';
+        }
+      } catch (cause) {
+        if (mounted && capture === current) {
+          error.value = cause instanceof Error ? cause.message : '录音保存失败，请重录。';
+          state.value = 'idle';
+        }
+      } finally {
+        if (capture === current) {
+          capture = null;
+          onCaptureChange?.(false);
+        }
+      }
+    }
+
+    function remove() {
+      capture?.close();
+      capture = null;
+      elapsed = 0;
+      resumedAt = null;
+      props.onCaptureChange?.(false);
+      audio = null;
+      clearPreview();
+      seconds.value = 0;
+      state.value = 'idle';
+      error.value = '';
+      listenerConsent.value = false;
+      idempotencyKey = null;
+    }
+
+    async function upload() {
+      const recording = audio;
+      if (!recording || state.value !== 'ready') return;
+      const { roundId, kind, onCommitted, onSubmitRecording } = props;
+      const consentToTranscribe = kind === 'listener' && listenerConsent.value;
+      if (kind === 'listener' && !consentToTranscribe) return;
+      state.value = 'uploading';
+      error.value = '';
+      try {
+        if (onSubmitRecording) {
+          await onSubmitRecording(recording);
+          return;
+        }
+        idempotencyKey ??= newRequestId();
+        const request = await fetch(`/api/rounds/${roundId}/uploads`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ kind, mimeType: recording.type, byteSize: recording.size, idempotencyKey }) });
+        const data = await request.json() as UploadResult & { error?: string };
+        if (!request.ok) throw new Error(uploadMessages[data.error ?? ''] ?? '无法申请上传，请重试。');
+        if (data.uploadUrl) {
+          const put = await fetch(data.uploadUrl, { method: 'PUT', headers: { 'Content-Type': recording.type }, body: recording }, 60000);
+          if (!put.ok) throw new Error('录音上传失败，请重试。');
+        }
+        const commit = await fetch(`/api/rounds/${roundId}/uploads/${data.audioId}/commit`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ expectedVersion: commitVersion, transcribe: kind === 'speaker', consentToTranscribe }) });
+        const result = await commit.json() as CommitResult & { error?: string };
+        if (!commit.ok) throw new Error(uploadMessages[result.error ?? ''] ?? '无法确认上传，请重试。');
+        await onCommitted();
+      } catch (cause) {
+        error.value = cause instanceof TypeError || cause instanceof DOMException ? '网络中断或请求超时，录音仍在，请重试上传。' : cause instanceof Error ? cause.message : '上传失败，请重试。';
+        state.value = 'ready';
+      }
+    }
+
+    return () => <section class="recorder"><h2>{props.kind === 'speaker' ? '表达录音' : '复述录音'}</h2>
+      <p>最长 {props.maxSeconds} 秒。录音仅在确认上传后发送；可暂停、预听或删除重录。</p>
+      <div class="record-time">{String(Math.floor(seconds.value / 60)).padStart(2, '0')}:{String(seconds.value % 60).padStart(2, '0')}</div>
+      {error.value && <p role="alert" class="error-text">{error.value}</p>}
+      {state.value === 'idle' && <button class="primary" onClick={() => void begin()}>开始录音</button>}
+      {state.value === 'starting' && <p>正在获取录音权限并同步本轮计时…</p>}
+      {(state.value === 'recording' || state.value === 'paused') && <><button class="secondary" onClick={toggle}>{state.value === 'recording' ? '暂停录音' : '继续录音'}</button><button class="primary" onClick={() => void finish()}>结束录音</button></>}
+      {state.value === 'finishing' && <p role="status">正在保存这次录音…</p>}
+      {(state.value === 'recording' || state.value === 'paused' || state.value === 'ready') && <button class="secondary" onClick={remove}>删除录音，重新录入</button>}
+      {state.value === 'ready' && <>
+        <audio controls src={preview.value ?? ''} />
+        {!props.onSubmitRecording && props.kind === 'speaker' && <div class="transcription-choice">确认上传后会自动转写</div>}
+        {props.kind === 'listener' && <label class="transcription-consent"><input type="checkbox" checked={listenerConsent.value} onChange={event => { listenerConsent.value = (event.currentTarget as HTMLInputElement).checked; }} /> 我知晓复述录音提交后会被转写，用于本轮逐条对照。</label>}
+        <button class="primary" disabled={props.kind === 'listener' && !listenerConsent.value} onClick={() => void upload()}>确认上传</button>
+      </>}
+      {state.value === 'uploading' && <p>正在上传并确认，请稍候…</p>}
+      {props.kind === 'speaker' && state.value !== 'ready' && <p>确认上传后自动转写，可在本轮信息点页面查看。</p>}
+    </section>;
+  },
+});

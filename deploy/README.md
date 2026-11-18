@@ -1,45 +1,25 @@
-# 动态 Demo 部署
+# 蜗牛回声训练室 V1.2.1 发布入口
 
-同一镜像运行 API 和 Worker。准备 PostgreSQL、Redis、S3 兼容对象存储和 HTTPS 反向代理。正式配置使用独立的数据库账号和私有音频桶。
+发布使用 [Vue 与 Spring Boot 部署说明](../server-java/README.md) 中的同源 Docker 镜像、MySQL 和私有对象存储。构建、预发布、真机验收和切换条件见 [整机验证清单](../server-java/PRE-DEVICE-VERIFICATION.md)。
 
-从仓库根目录构建。
+正式地址为 [蜗牛回声训练室 V1.2.1](https://47.239.63.61.sslip.io/)，使用的入口配置见 `Caddyfile.v1.2.1`。实际发布、恢复及清理记录见 [V1.2.1 执行记录](V1.2.1-CUTOVER-REVIEW.md)。
 
-```sh
-docker build -t snail-echo:local product
-```
+CI 的镜像构建通过 BuildKit 命名上下文复用前一阶段 Maven 测试已解析的依赖，并在 Maven 阶段使用离线模式。仅传入 `.m2/repository`，不包含 Maven 凭据配置；依赖缓存不会进入最终运行镜像。普通本地构建保持可联网解析依赖。相关机制见 [Docker 命名上下文](https://docs.docker.com/build/ci/github-actions/named-contexts/) 与 [缓存挂载](https://docs.docker.com/reference/dockerfile/#run---mounttypecache)。
 
-在部署主机安全创建 `runtime.env`。下面列出配置变量。
+主机测试和镜像打包都显式使用 `server-java/maven-settings.xml` 中相同的 Maven Central 仓库标识，避免不同 Maven 版本对缓存来源的判定不一致。该文件只有公共仓库地址，没有凭据；不删除缓存来源元数据或关闭校验。Ubuntu 运行镜像也通过官方 HTTPS 软件源安装依赖。
 
-| 变量 | 用途 |
-| --- | --- |
-| `PUBLIC_ORIGIN` | H5 的完整 HTTPS 源，例如 `https://echo.example.com`，结尾不加斜杠 |
-| `DATABASE_URL`、`REDIS_URL` | 容器可访问的 PostgreSQL 和 Redis 地址 |
-| `ENCRYPTION_MASTER_KEY` | 32 字节随机值的 Base64 表示，持久保管 |
-| `S3_ENDPOINT`、`S3_REGION`、`S3_BUCKET` | 内网对象存储地址、区域、已创建的私有桶 |
-| `S3_ACCESS_KEY`、`S3_SECRET_KEY` | 仅访问指定存储桶的凭据 |
-| `S3_PUBLIC_ENDPOINT` | 浏览器与火山 ASR 可访问的 HTTPS 签名入口 |
-| `AI_MODE` | 生产填 `real` |
-| `SPEECH_API_KEY`、`SPEECH_FILE_RESOURCE_ID` | 火山录音文件识别的凭据和资源 ID |
-| `ARK_API_KEY`、`ARK_MODEL_ID` | 方舟凭据与模型或接入点 ID |
-| `TRUSTED_PROXY` | 如果需要转发客户端 IP，仅填写受控代理的 IP 或网络段 |
-| `COMPARISON_CONCURRENCY` | Worker 并发数，默认 2，可按资源与供应商额度调整 |
+CI 的 Maven 从与构建器相同的官方 `maven:3.9.16-eclipse-temurin-21` 镜像提取，并记录实际版本；不使用 runner 上会随更新变化的默认 Maven。版本和仓库标识都相同后，离线构建才复用对应缓存。
 
-在对象存储为 H5 域配置 CORS，允许 `PUT`、`GET`、`HEAD` 及上传的 `Content-Type` 请求头。签名入口应原样传递请求方法、路径与查询参数。反向代理把 H5 的 HTTPS 请求转发到 API。数据库、Redis 和对象存储管理端口应在私有网络中。
+## 五种玩法真实服务联调
 
-以下示例使用名为 `echo-net` 的 Docker 网络。数据库、Redis 与对象存储也可托管，只要容器可访问；使用外部托管服务时可按部署环境调整网络选项。
+在独立的预发布环境启用火山文件转写与方舟，使用 HTTPS 签名入口传递临时音频。应用验收可在 HTTPS 预发布域名或通过 SSH 转发的本机入口执行。准备一段 30 秒以内、包含可核对短语且刻意遗漏至少一项家庭示例信息的合成中文复述录音。从仓库根目录运行：
 
 ```sh
-docker network create echo-net
-docker run --rm --network echo-net --env-file runtime.env snail-echo:local npm run db:migrate:built
-docker run -d --restart unless-stopped --name snail-echo-api --network echo-net --env-file runtime.env -p 127.0.0.1:3100:3000 snail-echo:local
-docker run -d --restart unless-stopped --name snail-echo-worker --network echo-net --env-file runtime.env snail-echo:local npm run start:worker
-curl -fsS http://127.0.0.1:3100/health/ready
+node deploy/solo-live-smoke.mjs https://staging.example.com /path/to/retell.wav '录音中的可核对短语'
+node deploy/solo-live-smoke.mjs https://staging.example.com /path/to/silence.wav --no-speech
+node deploy/room-live-smoke.mjs https://staging.example.com product/apps/web/public/practice-audio/family.mp3 /path/to/retell.mp3
 ```
 
-正式接口连通后，可在测试环境使用仓库自带样本，在仓库根目录执行以下验收。该脚本会创建测试房间并实际调用供应商。
+脚本使用正式音频接口验证火山转写、方舟对照、按角色展示的方舟建议、报告和访问隔离。房间脚本使用家庭原录音和省略“早点回来”的 MP3 复述，检查四种房间玩法。静音检查要求分析失败且归档被拒绝。脚本输出只包含检查结果，结束后撤销测试会话。
 
-```sh
-node deploy/fullstack-smoke.mjs https://echo.example.com https://echo.example.com sync
-```
-
-数据迁移和应用启动使用同一份运行配置。升级前备份数据库并保管对应密钥。回放依赖原始音频对象，备份及清理策略需一并覆盖对象存储。
+旧版 Node 联调脚本 `fullstack-smoke.mjs` 保留供历史回查。V1.2.1 的发布构建使用 `server-java/Dockerfile`。

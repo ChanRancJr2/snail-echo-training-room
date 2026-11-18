@@ -1,0 +1,14 @@
+# Proposed production routes. Apply only after the user's explicit approval.
+47.239.63.61.sslip.io {
+  reverse_proxy 127.0.0.1:3102
+}
+s3.47.239.63.61.sslip.io {
+  # Existing private bucket retained to preserve historical object references.
+  @production path /echo-v12-private /echo-v12-private/*
+  handle @production {
+    reverse_proxy 127.0.0.1:8333
+  }
+  handle {
+    respond 404
+  }
+}

@@ -3,7 +3,10 @@ import { randomBytes } from 'node:crypto';
 
 const database = 'postgres://echo:dev_only_change_me@127.0.0.1:15432/echo';
 const redis = 'redis://127.0.0.1:16379';
-const env = { ...process.env, NODE_ENV: 'development', PORT: '3100', WEB_ROOT: 'dist/web', PUBLIC_ORIGIN: 'http://127.0.0.1:3100', DATABASE_URL: database, REDIS_URL: redis,
+const port = process.env.ECHO_E2E_PORT ?? '3100';
+if (!/^\d+$/.test(port) || Number(port) < 1024 || Number(port) > 65535) throw new Error('ECHO_E2E_PORT must be between 1024 and 65535');
+const origin = `http://127.0.0.1:${port}`;
+const env = { ...process.env, NODE_ENV: 'development', PORT: port, WEB_ROOT: 'dist/web', PUBLIC_ORIGIN: origin, ECHO_PRODUCT_ORIGIN: origin, DATABASE_URL: database, REDIS_URL: redis,
   S3_ENDPOINT: 'http://127.0.0.1:18333', S3_REGION: 'us-east-1', S3_BUCKET: 'echo-private', S3_ACCESS_KEY: 'dev_echo_access', S3_SECRET_KEY: 'dev_echo_secret_only',
   ENCRYPTION_MASTER_KEY: randomBytes(32).toString('base64'), AI_MODE: 'mock' };
 const children = [];
@@ -35,10 +38,11 @@ try {
   await run(process.execPath, ['node_modules/vite/bin/vite.js', 'build', '--config', 'apps/web/vite.config.ts']);
   const api = launch(['--experimental-strip-types', 'apps/api/src/main.ts']);
   const comparisonWorker = launch(['--experimental-strip-types', 'apps/api/src/worker.ts']);
-  await waitFor('http://127.0.0.1:3100/health/ready', api);
   try {
+    await waitFor(`${origin}/health/ready`, api);
     await run(process.execPath, ['tests/room.browser.mjs']);
     await run(process.execPath, ['tests/modes.browser.mjs']);
+    await run(process.execPath, ['tests/solo-practice.browser.mjs']);
   }
   catch (error) { process.stderr.write(`API exit=${api.exitCode} signal=${api.signalCode}: ${api.recentOutput()}\nWORKER exit=${comparisonWorker.exitCode} signal=${comparisonWorker.signalCode}: ${comparisonWorker.recentOutput()}\n`); throw error; }
 } finally {

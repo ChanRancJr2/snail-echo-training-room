@@ -4,11 +4,13 @@ export interface Session {
   id: string;
   nickname: string;
   expiresAt: Date;
+  named: boolean;
 }
 
 export interface SessionStore {
   insert(input: Session & { tokenHash: string }): Promise<void>;
   findByTokenHash(tokenHash: string): Promise<Session | null>;
+  nameGuest(tokenHash: string, nickname: string, now: Date, expiresAt: Date): Promise<Session | null>;
   revoke(tokenHash: string): Promise<void>;
 }
 
@@ -23,12 +25,17 @@ export function parseSessionCookie(header: string | undefined): string | null {
   return /^[A-Za-z0-9_-]{43}$/.test(value) ? value : null;
 }
 
-export async function createAnonymousSession(store: SessionStore, nickname: string, now: Date): Promise<{ session: Session; token: string }> {
-  const clean = nickname.trim().slice(0, 20) || '访客';
+export async function createAnonymousSession(store: SessionStore, nickname: string | undefined, now: Date): Promise<{ session: Session; token: string }> {
   const token = randomBytes(32).toString('base64url');
-  const session = { id: randomUUID(), nickname: clean, expiresAt: new Date(now.getTime() + 12 * 60 * 60 * 1000) };
+  const named = nickname !== undefined;
+  const session = { id: randomUUID(), nickname: nickname ?? '访客', expiresAt: sessionExpiry(now, named), named };
   await store.insert({ ...session, tokenHash: hashToken(token) });
   return { session, token };
+}
+
+export function sessionExpiry(now: Date, named: boolean): Date {
+  const hours = named ? 30 * 24 : 12;
+  return new Date(now.getTime() + hours * 60 * 60 * 1000);
 }
 
 export async function findSession(store: SessionStore, cookie: string | undefined, now: Date): Promise<Session | null> {
@@ -38,8 +45,9 @@ export async function findSession(store: SessionStore, cookie: string | undefine
   return session && session.expiresAt.getTime() > now.getTime() ? session : null;
 }
 
-export function sessionCookie(token: string, secure: boolean): string {
-  return `echo_session=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=43200${secure ? '; Secure' : ''}`;
+export function sessionCookie(token: string, secure: boolean, expiresAt: Date, now: Date): string {
+  const maxAge = Math.max(0, Math.ceil((expiresAt.getTime() - now.getTime()) / 1000));
+  return `echo_session=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAge}${secure ? '; Secure' : ''}`;
 }
 
 export function expiredCookie(secure: boolean): string {

@@ -2,7 +2,7 @@ import Fastify from 'fastify';
 import helmet from '@fastify/helmet';
 import rateLimit from '@fastify/rate-limit';
 import { z } from 'zod';
-import { createAnonymousSession, expiredCookie, findSession, hashToken, parseSessionCookie, sessionCookie, type SessionStore } from './sessions.ts';
+import { createAnonymousSession, expiredCookie, findSession, hashToken, parseSessionCookie, sessionCookie, sessionExpiry, type Session, type SessionStore } from './sessions.ts';
 import { registerRoomRoutes } from './room-routes.ts';
 import type { PgRoomStore } from './rooms.ts';
 import type { PgRoundStore } from './rounds.ts';
@@ -12,7 +12,7 @@ import type { PgComparisonStore } from './comparisons.ts';
 import type { PgReviewStore } from './reviews.ts';
 import type { PgDeletionStore } from './deletions.ts';
 
-const sessionBody = z.object({ nickname: z.string().trim().max(20).optional() }).strict();
+const sessionBody = z.object({ nickname: z.string().trim().min(1).max(20).refine(name => !name.includes('\0')).optional() }).strict();
 
 export interface AppDependencies {
   sessions: SessionStore;
@@ -55,14 +55,37 @@ export async function createApp(deps: AppDependencies) {
     return { status: 'ok' };
   });
 
+  const sessionView = (session: Session, handoff?: { roomId: string } | null) =>
+    ({ id: session.id, nickname: session.nickname, expiresAt: session.expiresAt.toISOString(), named: session.named,
+       ...(handoff ? { handoffRoomId: handoff.roomId } : {}) });
+
   app.post('/api/sessions/anonymous', { config: { rateLimit: { max: 12, timeWindow: '1 minute' } } }, async (request, reply) => {
-    const current = await findSession(deps.sessions, request.headers.cookie, currentTime());
-    if (current && await deps.rooms?.childHandoff(current.id)) return reply.code(403).send({ error: 'GUARDIAN_REQUIRED' });
-    const parsed = sessionBody.safeParse(request.body ?? {});
+    const parsed = sessionBody.safeParse(request.body === undefined ? {} : request.body);
     if (!parsed.success) return reply.code(400).send({ error: 'INVALID_INPUT' });
-    const { session, token } = await createAnonymousSession(deps.sessions, parsed.data.nickname ?? '访客', currentTime());
-    reply.header('Set-Cookie', sessionCookie(token, deps.production));
-    return { id: session.id, nickname: session.nickname, expiresAt: session.expiresAt.toISOString() };
+    const { nickname } = parsed.data;
+    const now = currentTime();
+    const cookie = request.headers.cookie;
+    const current = await findSession(deps.sessions, cookie, now);
+    const handoff = current ? await deps.rooms?.childHandoff(current.id) : null;
+    reply.header('Cache-Control', 'no-store');
+    if (current && nickname === undefined) return sessionView(current, handoff);
+    if (handoff) return reply.code(403).send({ error: 'GUARDIAN_REQUIRED' });
+    const issue = (session: Session, token: string) => {
+      reply.header('Set-Cookie', sessionCookie(token, deps.production, session.expiresAt, now));
+      return sessionView(session);
+    };
+    const existingToken = parseSessionCookie(cookie);
+    if (current && existingToken && nickname !== undefined) {
+      if (current.named && current.nickname === nickname) return issue(current, existingToken);
+      if (!current.named) {
+        const named = await deps.sessions.nameGuest(hashToken(existingToken), nickname, now, sessionExpiry(now, true));
+        if (named) return issue(named, existingToken);
+        const latest = await findSession(deps.sessions, cookie, now);
+        if (latest?.named && latest.nickname === nickname) return issue(latest, existingToken);
+      }
+    }
+    const { session, token } = await createAnonymousSession(deps.sessions, nickname, now);
+    return issue(session, token);
   });
 
   app.get('/api/me', async (request, reply) => {
@@ -70,7 +93,7 @@ export async function createApp(deps: AppDependencies) {
     if (!session) return reply.code(401).send({ error: 'UNAUTHENTICATED' });
     const handoff = await deps.rooms?.childHandoff(session.id);
     reply.header('Cache-Control', 'no-store');
-    return { id: session.id, nickname: session.nickname, expiresAt: session.expiresAt.toISOString(), ...(handoff ? { handoffRoomId: handoff.roomId } : {}) };
+    return sessionView(session, handoff);
   });
 
   app.post('/api/sessions/logout', async (request, reply) => {

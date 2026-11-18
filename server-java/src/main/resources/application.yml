@@ -1,0 +1,55 @@
+server:
+  address: 127.0.0.1
+  port: ${JAVA_API_PORT:3001}
+  error:
+    include-message: never
+    include-stacktrace: never
+spring:
+  task:
+    scheduling:
+      pool:
+        size: 4
+  datasource:
+    url: ${JAVA_DB_URL}
+    username: ${JAVA_DB_USER}
+    password: ${JAVA_DB_PASSWORD}
+    hikari:
+      data-source-properties:
+        connectionTimeZone: '+00:00'
+        forceConnectionTimeZoneToSession: 'true'
+        preserveInstants: 'true'
+  jackson:
+    deserialization:
+      fail-on-unknown-properties: true
+      accept-float-as-int: false
+  mvc:
+    problemdetails:
+      enabled: false
+  servlet:
+    multipart:
+      max-file-size: 15000000B
+      max-request-size: 16MB
+mybatis:
+  configuration:
+    map-underscore-to-camel-case: true
+    local-cache-scope: STATEMENT
+echo:
+  origin: ${JAVA_PUBLIC_ORIGIN:http://localhost:3100}
+  storage:
+    enabled: ${JAVA_STORAGE_ENABLED:false}
+    endpoint: ${JAVA_STORAGE_ENDPOINT:}
+    public-endpoint: ${JAVA_STORAGE_PUBLIC_ENDPOINT:}
+    region: ${JAVA_STORAGE_REGION:us-east-1}
+    bucket: ${JAVA_STORAGE_BUCKET:}
+    access-key: ${JAVA_STORAGE_ACCESS_KEY:}
+    secret-key: ${JAVA_STORAGE_SECRET_KEY:}
+  processing:
+    enabled: ${JAVA_PROCESSING_ENABLED:false}
+    mode: ${JAVA_TRANSCRIPTION_MODE:}
+    master-key: ${JAVA_TEXT_MASTER_KEY:}
+    speech-api-key: ${SPEECH_API_KEY:}
+    speech-resource-id: ${SPEECH_RESOURCE_ID:}
+    ffmpeg-path: ${JAVA_FFMPEG_PATH:ffmpeg}
+    comparison-mode: ${JAVA_COMPARISON_MODE:rules}
+    ark-api-key: ${ARK_API_KEY:}
+    ark-model-id: ${ARK_MODEL_ID:}

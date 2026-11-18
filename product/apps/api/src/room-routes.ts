@@ -40,7 +40,9 @@ export function registerRoomRoutes(app: FastifyInstance, rooms: PgRoomStore, ses
   };
   app.addHook('preHandler', async (request, reply) => {
     const path = request.routeOptions.url;
-    if (!path?.startsWith('/api/') || path === '/api/me') return;
+    // Session bootstrap lets the child restore their current seat. Its handler
+    // independently blocks creating a new named session during handoff.
+    if (!path?.startsWith('/api/') || path === '/api/me' || path === '/api/sessions/anonymous') return;
     const session = await findSession(sessions, request.headers.cookie, now());
     if (!session) return;
     const handoff = await rooms.childHandoff(session.id);

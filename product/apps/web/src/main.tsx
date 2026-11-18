@@ -1,8 +1,5 @@
-import React from 'react';
-import { createRoot } from 'react-dom/client';
+import { createApp } from 'vue';
 import { App } from './App.tsx';
 import './style.css';
 
-createRoot(document.getElementById('root')!).render(
-  <React.StrictMode><App /></React.StrictMode>,
-);
+createApp(App).mount('#root');

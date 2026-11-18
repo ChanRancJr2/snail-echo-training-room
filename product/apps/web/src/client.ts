@@ -1,3 +1,8 @@
+export type PracticeAdvice = {
+  status: 'pending' | 'ready';
+  suggestions: Partial<Record<'speaker' | 'listener', { text: string; evidenceId: string | null; provider: 'ark' | 'rules' }>>;
+};
+
 export function newRequestId(): string {
   const crypto = globalThis.crypto;
   if (crypto?.randomUUID) return crypto.randomUUID();

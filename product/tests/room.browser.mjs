@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { mkdir } from 'node:fs/promises';
 import { chromium } from 'playwright';
+import { loginWithNickname } from './helpers/nickname.mjs';
 
 const executablePath = process.env.BROWSER_EXECUTABLE ?? (process.platform === 'win32' ? 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe' : undefined);
 const origin = process.env.ECHO_PRODUCT_ORIGIN ?? 'http://127.0.0.1:3100';
@@ -22,7 +23,7 @@ try {
   const errors = [];
   for (const page of [host, guest, observer, outsider]) page.on('pageerror', error => errors.push(error.message));
   await host.goto(origin);
-  await host.getByText('匿名会话已建立').waitFor({ timeout: 10000 }).catch(async error => { console.error(await host.locator('body').innerText()); throw error; });
+  const hostSession = await loginWithNickname(host, '听友');
   assert.equal(await host.getByRole('link', { name: '训练大厅' }).count(), 0);
   await host.getByRole('button', { name: /双人同步练/ }).click();
   await host.getByRole('button', { name: '1 分钟' }).click();
@@ -34,19 +35,20 @@ try {
   await host.getByText('准备好，慢慢开始').waitFor();
   assert.equal(await host.getByText('房间码').count(), 0);
   await guest.goto(`${origin}/#invite=${created.inviteToken}`);
-  await guest.getByRole('button', { name: '加入', exact: true }).click();
+  const guestSession = await loginWithNickname(guest, '听友', true);
+  assert.notEqual(hostSession.id, guestSession.id);
   await guest.getByText('准备好，慢慢开始').waitFor();
   await host.getByRole('button', { name: '观察者', exact: true }).click();
   const observerInvitePromise = host.waitForResponse(response => response.url().endsWith('/invitations') && response.request().method() === 'POST' && response.status() < 500);
   await host.getByRole('button', { name: '生成观察者邀请' }).click();
   const observerInvite = await (await observerInvitePromise).json();
   await observer.goto(`${origin}/#invite=${observerInvite.token}`);
-  await observer.getByRole('button', { name: '加入', exact: true }).click();
+  await loginWithNickname(observer, '观察员', true);
   await observer.getByText('你的座位：观察者').waitFor();
   await observer.getByRole('button', { name: '准备好了' }).click();
   await observer.getByRole('button', { name: '取消准备' }).waitFor();
   await outsider.goto(`${origin}/#invite=${observerInvite.token}`);
-  await outsider.getByRole('button', { name: '加入', exact: true }).click();
+  await loginWithNickname(outsider, '另一位观察员', true);
   await outsider.getByText('邀请已使用或过期，请让表达者重新生成。').waitFor();
   await host.getByRole('button', { name: '准备好了' }).click();
   assert.equal(await host.getByRole('button', { name: '开始本轮' }).isDisabled(), true);

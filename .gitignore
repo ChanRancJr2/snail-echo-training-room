@@ -17,3 +17,5 @@ secrets/
 开发上线凭据与资源审计.md
 runtime.env
 runtime.env.*
+server-java/target/
+server-java/.maven-cache/
