@@ -10,7 +10,7 @@ RUN npm run build:web
 # CI can seed this context with the repository used by the preceding Maven tests.
 FROM scratch AS maven-cache
 
-FROM maven:3.9-eclipse-temurin-21 AS api
+FROM maven:3.9.16-eclipse-temurin-21 AS api
 ARG MAVEN_OFFLINE=false
 WORKDIR /build
 COPY server-java/pom.xml ./

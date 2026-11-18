@@ -32,6 +32,14 @@ jobs:
           java-version: '21'
           cache: maven
           cache-dependency-path: server-java/pom.xml
+      - name: Use the same Maven as the release builder
+        run: |
+          docker pull maven:3.9.16-eclipse-temurin-21
+          task_maven_container=$(docker create maven:3.9.16-eclipse-temurin-21)
+          trap 'docker rm "$task_maven_container" >/dev/null' EXIT
+          docker cp "$task_maven_container:/usr/share/maven" "$RUNNER_TEMP/echo-maven"
+          echo "$RUNNER_TEMP/echo-maven/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/echo-maven/bin/mvn" --version
       - name: Install FFmpeg
         timeout-minutes: 8
         run: |
