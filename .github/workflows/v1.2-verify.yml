@@ -35,6 +35,10 @@ jobs:
       - name: Install FFmpeg
         timeout-minutes: 8
         run: |
+          # Avoid a slow regional mirror while retaining Ubuntu's signed indexes.
+          if [ -f /etc/apt/apt-mirrors.txt ]; then
+            printf '%s\n' 'https://archive.ubuntu.com/ubuntu/' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+          fi
           printf 'Acquire::Retries "2";\nAcquire::http::Timeout "20";\nAcquire::https::Timeout "20";\n' | sudo tee /etc/apt/apt.conf.d/80-echo-ci-timeouts >/dev/null
           if ! command -v ffmpeg >/dev/null; then
             timeout 180s sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update
