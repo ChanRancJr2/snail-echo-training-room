@@ -4,6 +4,8 @@
 
 正式地址为 [蜗牛回声训练室 V1.2.1](https://47.239.63.61.sslip.io/)，使用的入口配置见 `Caddyfile.v1.2.1`。实际发布、恢复及清理记录见 [V1.2.1 执行记录](V1.2.1-CUTOVER-REVIEW.md)。
 
+CI 的镜像构建通过 BuildKit 命名上下文复用前一阶段 Maven 测试已解析的依赖，并在 Maven 阶段使用离线模式。仅传入 `.m2/repository`，不包含 Maven 凭据配置；依赖缓存不会进入最终运行镜像。普通本地构建保持可联网解析依赖。相关机制见 [Docker 命名上下文](https://docs.docker.com/build/ci/github-actions/named-contexts/) 与 [缓存挂载](https://docs.docker.com/reference/dockerfile/#run---mounttypecache)。
+
 ## 五种玩法真实服务联调
 
 在独立的预发布环境启用火山文件转写与方舟，使用 HTTPS 签名入口传递临时音频。应用验收可在 HTTPS 预发布域名或通过 SSH 转发的本机入口执行。准备一段 30 秒以内、包含可核对短语且刻意遗漏至少一项家庭示例信息的合成中文复述录音。从仓库根目录运行：
