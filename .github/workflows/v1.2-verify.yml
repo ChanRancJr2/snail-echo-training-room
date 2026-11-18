@@ -39,7 +39,8 @@ jobs:
           trap 'docker rm "$task_maven_container" >/dev/null' EXIT
           docker cp "$task_maven_container:/usr/share/maven" "$RUNNER_TEMP/echo-maven"
           echo "$RUNNER_TEMP/echo-maven/bin" >> "$GITHUB_PATH"
-          "$RUNNER_TEMP/echo-maven/bin/mvn" --version
+          echo "MAVEN_HOME=$RUNNER_TEMP/echo-maven" >> "$GITHUB_ENV"
+          MAVEN_HOME="$RUNNER_TEMP/echo-maven" "$RUNNER_TEMP/echo-maven/bin/mvn" --version
       - name: Install FFmpeg
         timeout-minutes: 8
         run: |
