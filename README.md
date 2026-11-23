@@ -1,6 +1,6 @@
-# 蜗牛回声训练室 V1.2.1
+# 蜗牛回声训练室 V1.2.2
 
-[打开训练室](https://47.239.63.61.sslip.io/) · [本地运行与部署](server-java/README.md) · [发布执行记录](deploy/V1.2.1-CUTOVER-REVIEW.md)
+[打开训练室](https://47.239.63.61.sslip.io/) · [本地运行与部署](server-java/README.md) · [发布说明](deploy/README.md)
 
 Vue 3 + TypeScript 前端、Java 21 + Spring Boot 后端、MySQL 8.4 和私有 S3 兼容录音存储组成同源 HTTPS 全栈应用。发布镜像由 `server-java/Dockerfile` 构建。
 
@@ -9,7 +9,7 @@ Vue 3 + TypeScript 前端、Java 21 + Spring Boot 后端、MySQL 8.4 和私有 S
 | 玩法 | 参与方式 |
 | --- | --- |
 | 双人同步练 | 独立会话通过邀请加入，表达与复述同步推进，可邀请观察者 |
-| 双座位自练 | 一人使用两个座位完成表达、复述和逐条标注 |
+| 双座位自练 | 一人使用两个座位完成表达、复述和整轮标注 |
 | 亲子同机练 | 同一设备交替操作，下一轮交换表达与复述身份 |
 | 异步留言练 | 表达者分享邀请；复述者依进入时机等待或打开留言 |
 | 单人练习 | 玩家始终为复述者，本人录音与素材库原录音进行分析 |

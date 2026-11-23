@@ -1,7 +1,3 @@
-.solo-practice .stepper div {
-  grid-template-columns: repeat(6, minmax(0, 1fr));
-}
-
 .solo-config .option-grid button,
 .solo-practice .text-button {
   min-height: 44px;

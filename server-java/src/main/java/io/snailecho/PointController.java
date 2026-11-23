@@ -41,7 +41,7 @@ class PointController {
     record PointInput(@NotNull @Pattern(regexp = "人物|事件|需求|情绪|因果|重点|时间") String category,
                       @NotBlank @Size(max = 200) String text) {}
     record ConfirmPoints(@NotNull @Min(1) Long expectedVersion,
-                         @NotNull @Size(min = 1, max = 12) List<@NotNull @Valid PointInput> points) {}
+                         @NotNull @Size(max = 12) List<@NotNull @Valid PointInput> points) {}
     record Aid(@NotNull @Pattern(regexp = "replay|keywords") String kind) {}
 
     @GetMapping("/speaker-transcript")

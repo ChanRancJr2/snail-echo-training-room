@@ -2,6 +2,7 @@ package io.snailecho;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -44,7 +45,7 @@ class RoomController {
                          Integer durationSeconds, @Pattern(regexp = "auditory|keywords") String retellStyle,
                          @Size(max = 80) String topic, @Valid TeenInput teen) {}
     record InviteRequest(@NotNull @Pattern(regexp = "listener|observer") String role,
-                         @NotNull @Min(5) @Max(10080) Integer minutes,
+                         @NotNull @Min(0) @Max(10080) Integer minutes,
                          @NotNull @Min(1) @Max(10) Integer maxUses,
                          @Size(min = 6, max = 100) String password) {}
     record JoinRequest(@NotNull String token, @Size(max = 100) String password) {}
@@ -126,6 +127,11 @@ class RoomController {
                                               @CookieValue(value = SESSION, required = false) String cookie) {
         return ResponseEntity.ok().cacheControl(CacheControl.noStore())
                 .body(rooms.snapshot(roomId.toString(), sessions.require(cookie).id()));
+    }
+
+    @GetMapping("/api/rooms/async-messages")
+    ResponseEntity<List<RoomMapper.AsyncMessage>> asyncMessages(@CookieValue(value = SESSION, required = false) String cookie) {
+        return ResponseEntity.ok().cacheControl(CacheControl.noStore()).body(rooms.asyncMessages(sessions.require(cookie).id()));
     }
 
     @PostMapping("/api/rooms/{roomId}/invitations")

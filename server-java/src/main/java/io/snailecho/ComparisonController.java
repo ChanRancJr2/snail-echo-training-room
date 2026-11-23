@@ -40,6 +40,9 @@ class ComparisonController {
     }
 
     record Version(@NotNull @Min(1) Long expectedVersion) {}
+    record WholeLabels(@NotNull @Min(1) Long expectedVersion, @NotNull @Size(max = 6) List<String> retellTags,
+                       @NotNull @Size(max = 3) List<String> expressionTags) {}
+    record WholeNote(@NotNull @Min(1) Long expectedVersion, @NotNull @Size(max = 500) String note) {}
     record Issue(@NotNull @Min(1) Long expectedVersion, @NotNull UUID issueId) {}
     record Note(@NotNull @Min(1) Long expectedVersion, @NotNull UUID issueId, @NotBlank @Size(max = 500) String note) {}
     record Observation(@NotNull @Min(1) Long expectedVersion, @NotNull UUID issueId,
@@ -65,6 +68,28 @@ class ComparisonController {
             @CookieValue(value = SESSION, required = false) String cookie) {
         return service.label(roundId.toString(), actor(from, cookie), command.expectedVersion(),
                 command.labels().stream().map(Label::value).toList());
+    }
+
+    @PostMapping("/review/round-labels")
+    ComparisonService.Updated wholeLabels(@PathVariable UUID roundId, @Valid @RequestBody WholeLabels command,
+            @RequestHeader(value = "Origin", required = false) String from,
+            @CookieValue(value = SESSION, required = false) String cookie) {
+        return service.labelWholeRound(roundId.toString(), actor(from, cookie), command.expectedVersion(),
+                command.retellTags(), command.expressionTags());
+    }
+
+    @PostMapping("/review/round-clarification")
+    ComparisonService.Updated wholeClarification(@PathVariable UUID roundId, @Valid @RequestBody WholeNote command,
+            @RequestHeader(value = "Origin", required = false) String from,
+            @CookieValue(value = SESSION, required = false) String cookie) {
+        return service.clarifyWholeRound(roundId.toString(), actor(from, cookie), command.expectedVersion(), command.note());
+    }
+
+    @PostMapping("/review/open-round-review")
+    ComparisonService.Updated openRoundReview(@PathVariable UUID roundId, @Valid @RequestBody Version command,
+            @RequestHeader(value = "Origin", required = false) String from,
+            @CookieValue(value = SESSION, required = false) String cookie) {
+        return service.openWholeRoundReview(roundId.toString(), actor(from, cookie), command.expectedVersion());
     }
 
     @PostMapping("/review/revise")

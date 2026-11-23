@@ -3,11 +3,12 @@ import { boundedFetch as fetch, type PracticeAdvice } from './client.ts';
 import { AudioPlayer } from './AudioPlayer.tsx';
 import { MaterialConsentButton } from './MaterialConsentButton.tsx';
 import { nextPractice } from './flow.ts';
+import { RoundLabelFields, emptyLabels, feedbackSummary, type RoundFeedback, type RoundLabels } from './RoundFeedback.tsx';
 
 type Resolution = 'misunderstanding' | 'expression' | 'ai_error';
 type Observation = { tag: string; note: string | null };
 type Item = { id: string; category: string; original: string; speakerQuote: string | null; listenerQuote: string; complete: boolean; accurate: boolean; tag: string | null; clarification: string | null; resolution: Resolution | null; speakerConfirmed: boolean; listenerConfirmed: boolean; listenerNote: string | null; listenerNotes?: string[]; observerTag: string | null; observerNote: string | null; observations?: Observation[] };
-type Result = { advice?: PracticeAdvice | null; total: number; complete: number; accurate: number; excluded?: number; issues: Item[]; adviceAccepted: boolean; listenerAdviceAccepted?: boolean; provider?: 'mock' | 'rules' | 'ark' | 'ark_partial' | 'rules_fallback'; transcripts?: { speaker: string; listener: string }; report?: { topic: string; focus: string; speaker: string; listener: string; speakerAudioId: string | null; listenerAudioId: string | null; hintLevel: number } };
+type Result = { advice?: PracticeAdvice | null; total: number; complete: number; accurate: number; excluded?: number; issues: Item[]; adviceAccepted: boolean; listenerAdviceAccepted?: boolean; provider?: 'mock' | 'rules' | 'ark' | 'ark_partial' | 'rules_fallback' | 'no_points'; transcripts?: { speaker: string | null; listener: string | null; speakerPending?: boolean }; report?: { topic: string; focus: string; speaker: string; listener: string; speakerAudioId: string | null; listenerAudioId: string | null; hintLevel: number }; wholeRoundFeedback?: RoundFeedback | null; recordings?: { speaker: string | null; listener: string | null } };
 const sentences = (text: string) => text.match(/[^。！？!?\n]+[。！？!?]?/g)?.map(value => value.trim()).filter(Boolean) ?? [];
 const tags = ['遗漏重要信息', '理解不到位', '理解偏了', '杜撰信息', '强加信息', '我表达不清', '我言不达意', '语气被误解', '重点被误解', 'AI 误判'];
 const resolutions: [Resolution, string][] = [['misunderstanding', '真误解'], ['expression', '表达问题'], ['ai_error', 'AI 误判']];
@@ -27,6 +28,9 @@ export const ComparisonView = defineComponent((props: ComparisonProps) => {
   const speakerAudio = ref<HTMLAudioElement | null>(null);
   const listenerAudio = ref<HTMLAudioElement | null>(null);
   const draftChoices = ref<Record<string, { tag: string; resolution: Resolution }>>({});
+  const roundLabels = ref<RoundLabels | null>(null);
+  const clarification = ref<string | null>(null);
+  const savedClarification = ref<string | null>(null);
 
   function reportAudio(audioId: string, seat: 'speaker' | 'listener', audioRef: Ref<HTMLAudioElement | null>) {
     const { roundId, role, solo } = props;
@@ -58,7 +62,8 @@ export const ComparisonView = defineComponent((props: ComparisonProps) => {
         return;
       }
       loadedComparison.value = { roundId, version, result };
-      if (result.advice?.status === 'pending' && props.stage === 'ADVICE') {
+      if (result.transcripts?.speakerPending ||
+          result.advice?.status === 'pending' && (props.stage === 'ADVICE' || props.stage === 'ARCHIVED')) {
         timer = window.setTimeout(() => { reload.value += 1; }, 2000);
       }
       draftChoices.value = Object.fromEntries(result.issues.map(item => [item.id, { tag: item.tag ?? '遗漏重要信息', resolution: item.resolution ?? 'misunderstanding' }]));
@@ -135,11 +140,12 @@ export const ComparisonView = defineComponent((props: ComparisonProps) => {
     if (loaded?.roundId !== roundId || loaded.version !== version) return <div>{error ? <><p role="alert" class="error-text">{error}</p><button onClick={() => { requestError.value = ''; reload.value += 1; }}>重新读取</button></> : <p>正在读取对照结果…</p>}</div>;
     const { result } = loaded;
     const problems = result.issues.filter(item => !item.complete || !item.accurate);
-    const paired = result.transcripts && [sentences(result.transcripts.speaker), sentences(result.transcripts.listener)];
+    const paired = result.transcripts?.speaker && result.transcripts.listener &&
+      [sentences(result.transcripts.speaker), sentences(result.transcripts.listener)];
     const allowsDisagreement = result.excluded !== undefined;
     const allConfirmed = problems.every(item => item.speakerConfirmed && (allowsDisagreement || item.listenerConfirmed));
     const isReport = stage === 'ARCHIVED';
-    const countedProblems = isReport && allowsDisagreement ? problems.filter(item => item.listenerConfirmed) : problems;
+    const countedProblems = isReport && allowsDisagreement && !result.wholeRoundFeedback ? problems.filter(item => item.listenerConfirmed) : problems;
     const isComparison = stage === 'SPEAKER_LABELING' && !labeling;
     const editable = labeling && stage === 'SPEAKER_LABELING' || stage === 'MUTUAL_CONFIRM';
     const report = result.report;
@@ -151,6 +157,47 @@ export const ComparisonView = defineComponent((props: ComparisonProps) => {
     const listenerAdvice = result.advice?.suggestions.listener;
     const advicePending = result.advice?.status === 'pending';
     const ownAdviceAccepted = role === 'speaker' ? result.adviceAccepted : result.listenerAdviceAccepted === true;
+    const ownAdvice = role === 'speaker' ? speakerAdvice : listenerAdvice;
+    const wholeLabeling = stage === 'MUTUAL_CONFIRM' || stage === 'SPEAKER_LABELING' && labeling;
+    if (javaBackend && (wholeLabeling || stage === 'LISTENER_CLARIFICATION')) {
+      const reviewing = role === 'speaker';
+      const clarifying = role === 'listener';
+      const prior = result.wholeRoundFeedback;
+      const labels = roundLabels.value ?? (prior ? { retellTags: prior.retellTags, expressionTags: prior.expressionTags } : emptyLabels());
+      const savedNote = savedClarification.value ?? prior?.note ?? '';
+      const draftNote = clarification.value ?? savedNote;
+      return <section class="comparison-view">
+        <div class="round-recordings">
+          {(['speaker', 'listener'] as const).map(seat => {
+            const name = seat === 'speaker' ? '表达者' : '复述者';
+            const audioId = result.recordings?.[seat];
+            return <section key={seat}>
+              <h2>{name}{role === 'observer' ? '录音' : '录音与转写'}</h2>
+              {audioId && <AudioPlayer roundId={roundId} audioId={audioId} label={name + '录音'}
+                audioRef={seat === 'speaker' ? speakerAudio : listenerAudio} />}
+              {role !== 'observer' && <p>{result.transcripts?.[seat] ||
+                (seat === 'speaker' && result.transcripts?.speakerPending ? '表达录音正在转写…' : '暂无可用转写。')}</p>}
+            </section>;
+          })}
+        </div>
+        {reviewing && <form onSubmit={event => { event.preventDefault(); void send('round-labels', labels); }}>
+          <RoundLabelFields value={labels} disabled={busy} onChange={next => { roundLabels.value = next; }} />
+          <button type="submit" class="primary" disabled={busy}>{solo ? '提交标注，查看建议' : '提交标注'}</button>
+        </form>}
+        {clarifying && <form onSubmit={event => {
+          event.preventDefault();
+          const note = draftNote.trim();
+          if (note !== savedNote) void send('round-clarification', { note }, () => { savedClarification.value = note; });
+        }}>
+          <label>补充澄清（选填）<textarea name="clarification" rows={4} maxlength={500} value={draftNote}
+            onInput={event => { clarification.value = (event.currentTarget as HTMLTextAreaElement).value; }} /></label>
+          <button type="submit" class="primary" disabled={busy || draftNote.trim() === savedNote}>保存澄清</button>
+          {savedClarification.value !== null && draftNote.trim() === savedNote && <p role="status">澄清已保存。</p>}
+          <p>表达者提交标注后，双方进入建议页，本轮保留已保存的澄清。</p>
+        </form>}
+        {error && <p role="alert" class="error-text">{error}</p>}
+      </section>;
+    }
     if (stage === 'ADVICE') return <section class="comparison-view">
       {error && <p role="alert" class="error-text">{error}</p>}
       {role !== 'listener' && <><h2>{compactReview ? '本轮建议' : '给表达者的建议'}</h2><blockquote>{speakerAdvice?.text ?? (advicePending ? "正在生成建议…" : speakerIssue
@@ -164,11 +211,13 @@ export const ComparisonView = defineComponent((props: ComparisonProps) => {
       {role !== 'speaker' && <p role="status">等待表达者归档本轮。</p>}
       {role !== 'observer' && <button class="secondary" disabled={busy || ownAdviceAccepted || advicePending} onClick={() => void send('adopt', {})}>{ownAdviceAccepted ? '已采纳' : '采纳这条建议'}</button>}
     </section>;
-    return <section class="comparison-view"><p>{isReport ? '本轮报告已归档。' : compactReview && stage === 'MUTUAL_CONFIRM' ? '请确认本轮标注。' : '双方逐条确认最终结论。'}</p>
+    const hasPointComparison = result.provider !== 'no_points';
+    return <section class="comparison-view"><p>{isReport ? '本轮报告已归档。' : !hasPointComparison ? '回顾本轮表达和复述。' : javaBackend ? '先查看 AI 对照结果。' : compactReview && stage === 'MUTUAL_CONFIRM' ? '请确认本轮标注。' : '双方逐条确认最终结论。'}</p>
       {result.provider === 'mock' && <p class="notice">演示对照使用预置转写和文字匹配。</p>}
       {result.provider === 'rules' && <p class="notice">对照结果基于转写和字面匹配。</p>}
       {result.provider === 'rules_fallback' && <p class="notice">语义对照暂不可用，以下是字面匹配结果，请双方核对。</p>}
       {result.provider === 'ark_partial' && <p class="notice">部分要点使用字面匹配，请双方核对。</p>}
+      {result.provider === 'no_points' && <p class="notice">本轮没有确认要点，保留录音和转写供回顾。</p>}
       {(!result.provider || result.provider === 'ark') && !isReport && <p>AI 提供辅助提示。</p>}
       {error && <p role="alert" class="error-text">{error}</p>}
       {report && seats && <>
@@ -176,8 +225,8 @@ export const ComparisonView = defineComponent((props: ComparisonProps) => {
         <p>{seats[0]} / {seats[1]} · 提示级别 {report.hintLevel}</p>
         {!anonymous && report.focus && <p>预标重点 · {report.focus}</p>}
         {ownAdviceAccepted && <p>你已采纳本轮练习建议。</p>}
-        {ownAdviceAccepted && (role === 'speaker' ? speakerAdvice : listenerAdvice) &&
-          <blockquote>{(role === 'speaker' ? speakerAdvice : listenerAdvice)?.text}</blockquote>}
+        {ownAdvice && <blockquote>{ownAdvice.text}</blockquote>}
+        {advicePending && <p role="status">正在生成本轮建议…</p>}
         <p>{practice}</p>
         {!anonymous && <div class="report-media">
           {report.speakerAudioId && reportAudio(report.speakerAudioId, 'speaker', speakerAudio)}
@@ -187,8 +236,10 @@ export const ComparisonView = defineComponent((props: ComparisonProps) => {
           <h3>表达录音转写</h3><p>{result.transcripts.speaker}</p>
           <h3>复述录音转写</h3><p>{result.transcripts.listener}</p>
         </details>}
+        {!anonymous && result.wholeRoundFeedback && feedbackSummary(result.wholeRoundFeedback)}
       </>}
-      {(isComparison || isReport) && <div class="comparison-grid">
+      {isReport && hasPointComparison && result.wholeRoundFeedback && <h2>AI 对照结果</h2>}
+      {hasPointComparison && (isComparison || isReport) && <div class="comparison-grid">
         <div><span>完整度</span><strong>{result.complete} / {result.total}</strong></div>
         <div><span>准确度</span><strong>{result.accurate} / {result.total}</strong></div>
         <div><span>偏差类型</span><strong>{new Set(countedProblems.map(item => item.tag).filter(Boolean)).size} 类</strong><p>{[...new Set(countedProblems.flatMap(item => item.tag ? [item.tag] : []))].join('、') || '暂无标签'}</p></div>
@@ -245,7 +296,10 @@ export const ComparisonView = defineComponent((props: ComparisonProps) => {
           </div>}
         </>}
       </article>)}
-      {isComparison && role === 'speaker' && <button class="primary" onClick={() => onLabeling?.()}>{compactReview ? '请逐条标注' : '请表达者逐条标注'}</button>}
+      {isComparison && role === 'speaker' && <button class="primary" disabled={busy} onClick={() => {
+        if (javaBackend && !solo) void send('open-round-review', {});
+        else onLabeling?.();
+      }}>{javaBackend ? '开始整轮标注' : compactReview ? '请逐条标注' : '请表达者逐条标注'}</button>}
       {isComparison && role === 'listener' && <p role="status">等待表达者提交标注。</p>}
       {labeling && stage === 'SPEAKER_LABELING' && role === 'speaker' && <button class="primary" disabled={busy} onClick={() => void (compactReview && !atomicReview
         ? completeSoloReview(problems.map(item => ({
@@ -259,6 +313,11 @@ export const ComparisonView = defineComponent((props: ComparisonProps) => {
       {stage === 'MUTUAL_CONFIRM' && !compactReview && role === 'speaker' && <button class="primary" disabled={busy || !allConfirmed} onClick={() => void send('submit', {})}>表达者提交，查看改写建议</button>}
       {isReport && <a class="report-download" download="回声训练室-轮次报告.txt" href={`data:text/plain;charset=utf-8,${encodeURIComponent(
         ['回声训练室 · 本轮报告', ...(seats ?? []), `完整度 ${result.complete}/${result.total}`, `准确度 ${result.accurate}/${result.total}`,
+          ...(!anonymous && result.wholeRoundFeedback ? [
+            `复述偏差：${result.wholeRoundFeedback.retellTags.join('、') || '无标注'}`,
+            `表达问题：${result.wholeRoundFeedback.expressionTags.join('、') || '无标注'}`,
+            ...(result.wholeRoundFeedback.note ? [`澄清：${result.wholeRoundFeedback.note}`] : []),
+          ] : []),
           ...(result.excluded ? [`${result.excluded} 条未达成一致，不计入本轮结果。`] : []),
           ...countedProblems.map(item => anonymous ? item.tag ?? '差异' : `${item.tag ?? '差异'}：${item.original}；复述：${item.listenerQuote || '未找到对应句子'}`)].join('\n'))}`}>导出本轮报告（TXT）</a>}
       {stage === 'MUTUAL_CONFIRM' && !compactReview && <p class="notice">{allowsDisagreement ? '表达者逐条确认后可以提交。复述者未确认的条目不计入本轮结果。' : solo ? '请切换座位分别确认。' : '每条都要由表达者和复述者各自确认。'}修改标签或结论会清除该条旧确认。</p>}

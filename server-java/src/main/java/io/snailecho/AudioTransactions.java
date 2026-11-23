@@ -99,7 +99,7 @@ class AudioTransactions {
         boolean allowed = switch (round.stage()) {
             case "KEYPOINT_CONFIRM", "ASYNC_PENDING" -> speakerAudio && actor.equals(round.speakerSessionId());
             case "LISTENER_RETELL", "COMPARING" -> speakerAudio && (participant || "observer".equals(member.role()));
-            case "SPEAKER_LABELING", "MUTUAL_CONFIRM", "ADVICE" -> participant || "observer".equals(member.role());
+            case "SPEAKER_LABELING", "MUTUAL_CONFIRM", "LISTENER_CLARIFICATION", "ADVICE" -> participant || "observer".equals(member.role());
             default -> false;
         };
         if (!allowed) throw inaccessible();

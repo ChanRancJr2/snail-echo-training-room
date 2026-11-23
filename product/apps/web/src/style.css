@@ -2,17 +2,17 @@
 .card{background:#fffdfa;border-radius:18px;padding:20px;margin:18px 0;box-shadow:0 12px 35px #2b3e370d}.card h2{margin:0 0 14px}.card p{font-size:13px;color:#64736e;line-height:1.7}.card input{width:100%;padding:13px;border:1px solid #d6ddd8;border-radius:10px;margin:8px 0}button.primary,button.secondary,button.danger{display:block;width:100%;border:0;border-radius:11px;padding:14px;margin-top:10px;font-weight:700}button.primary{background:#265e5c;color:white}button.secondary{background:#e4f0ed;color:#265e5c}button.danger{background:#fbe9e5;color:#9b3d32}button.text-button{border:0;background:none;color:#265e5c;padding:12px}.member{background:#f3f6f3;border-radius:10px;padding:14px;display:flex;justify-content:space-between;margin:8px 0;font-size:13px}.member b{color:#265e5c}.error{background:#fbe9e5;color:#9b3d32}button:disabled{opacity:.5;cursor:not-allowed}
 .recorder{margin:18px 0;border-top:1px solid #e1e7e1;padding-top:16px}.recorder h2{margin:4px 0}.record-time{text-align:center;font-size:32px;font-weight:700;color:#265e5c;padding:16px}.recorder audio{width:100%;margin:10px 0}.error-text{color:#9b3d32!important}
 .option-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:10px 0 18px}.option-grid button{border:1px solid #dfe7e1;background:#fff;border-radius:10px;padding:12px 6px;color:#345251}.option-grid button.chosen{background:#265e5c;color:#fff;border-color:#265e5c}.card>strong{display:block;font-size:13px;margin-top:12px}
-.transcription-choice{display:flex;align-items:center;justify-content:space-between;gap:10px;background:#f3f7f3;padding:12px;border-radius:11px;font-size:12px;margin:10px 0}.transcription-choice .secondary{width:auto;min-width:72px;margin:0;padding:9px}
 .point-editor{border-top:1px solid #e1e7e1;margin-top:18px;padding-top:14px}.point-entry{display:grid;grid-template-columns:105px 1fr;gap:7px}.point-entry select,.point-entry input{min-width:0;padding:11px;border:1px solid #d6ddd8;border-radius:10px;background:#fff}.point-editor .member .text-button{padding:0 0 0 8px;flex:none}
-.transcription-consent{display:flex;align-items:flex-start;gap:8px;font-size:12px;line-height:1.6;background:#f3f7f3;border-radius:10px;padding:12px;margin:10px 0}.transcription-consent input{accent-color:#265e5c;margin-top:3px}
+.round-labels{min-inline-size:0;border:1px solid #d6ddd8;border-radius:10px;margin:1rem 0;padding:0 .75rem}.round-labels legend{font-weight:700}.round-labels label{display:flex;align-items:center;min-height:48px}.round-labels label+label{border-top:1px solid #e1e7e1}
+.round-recordings section+section{border-top:1px solid #e1e7e1;padding-top:1rem}.round-recordings p,.round-feedback-summary p{white-space:pre-wrap;overflow-wrap:anywhere}
 .comparison-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}.comparison-grid>div{padding:12px;border-radius:10px;background:#f3f7f3}.comparison-grid span,.comparison-grid strong{display:block}.comparison-grid span{font-size:11px;color:#64736e}.comparison-grid strong{margin-top:6px;color:#265e5c}.comparison-item{border-top:1px solid #e1e7e1;padding:12px 0}.comparison-item h4{margin:3px 0 10px}.comparison-item p{margin:6px 0}
 .review-fields{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin:12px 0}.review-fields label{font-size:12px}.review-fields select{display:block;width:100%;padding:10px 6px;margin-top:5px;border:1px solid #d6ddd8;border-radius:9px;background:#fff}.review-confirm{padding:10px;background:#f3f7f3;border-radius:9px;font-size:12px}.review-confirm .secondary{margin-top:8px}.review-confirm .text-button{padding:8px 0}
 
 .flow-title{font-size:clamp(1.65rem,7vw,2.25rem);margin:12px 0;letter-spacing:-.025em}
 .flow-context{color:#536a65;font-size:.875rem;line-height:1.6}
 .stepper{color:#536a65;font-size:.8rem;margin-top:20px}
-.stepper div{display:grid;grid-template-columns:repeat(9,minmax(0,1fr));gap:5px;margin-top:8px}
-.stepper i{height:4px;border-radius:4px;background:#d6ded8}
+.stepper div{display:flex;gap:5px;margin-top:8px}
+.stepper i{flex:1;height:4px;border-radius:4px;background:#d6ded8}
 .stepper i.filled{background:#265e5c}
 .round-content .recorder,.round-content .point-editor{border:0;margin:0;padding:0}
 .round-content .audio-player + .recorder{border-top:1px solid #d6ded8;margin-top:20px;padding-top:18px}

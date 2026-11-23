@@ -162,6 +162,16 @@ class SoloPracticeAnalysis {
         return result;
     }
 
+    CoachingAdvice.View submitWholeReview(String id, String owner, WholeRoundFeedback feedback) {
+        var job = owned(id, owner);
+        if (!"ready".equals(job.status())) throw new ApiFailure(409, "SOLO_NOT_READY");
+        var evidence = result(job).comparison().issues().stream()
+                .map(issue -> new ArkComparison.CoachingEvidence(issue.id(), issue.original(), issue.retell(), "system_detected"))
+                .toList();
+        coaching.enqueue("solo:" + id, evidence, List.of("listener"), feedback);
+        return coaching.view("solo:" + id);
+    }
+
     void archive(String id, String owner, boolean accepted) {
         var job = owned(id, owner);
         if (!"ready".equals(job.status())) throw new ApiFailure(409, "SOLO_NOT_READY");
@@ -197,6 +207,7 @@ class SoloPracticeAnalysis {
                 """, vault.seal("solo-text:" + job.id(), transcript), vault.seal("solo-result:" + job.id(), json.writeValueAsString(comparison)),
                 job.id(), lease.token());
         } catch (AsrFailure error) {
+            LOG.warn("Solo practice transcription failed ({})", error.getMessage());
             if (error.retryable()) defer(lease, job.providerTask());
             else fail(lease, "TRANSCRIPTION_FAILED");
         } catch (JsonProcessingException | RuntimeException error) {

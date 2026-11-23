@@ -10,6 +10,7 @@ export type Stage =
   | 'COMPARING'
   | 'SPEAKER_LABELING'
   | 'MUTUAL_CONFIRM'
+  | 'LISTENER_CLARIFICATION'
   | 'ADVICE'
   | 'ARCHIVED'
   | 'CANCELLED';

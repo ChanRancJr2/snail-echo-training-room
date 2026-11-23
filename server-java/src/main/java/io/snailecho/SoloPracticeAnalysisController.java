@@ -38,6 +38,8 @@ class SoloPracticeAnalysisController {
 
     record Report(@NotNull Boolean accepted) {}
     record Review(@NotNull @Size(max = 12) List<SoloPracticeAnalysis.ReviewChoice> choices) {}
+    record WholeReview(@NotNull @Size(max = 6) List<String> retellTags,
+                       @NotNull @Size(max = 3) List<String> expressionTags, @Size(max = 500) String note) {}
 
     @PostMapping(value = "/audio", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     ResponseEntity<Void> audio(@PathVariable UUID id, @RequestParam String materialId,
@@ -68,6 +70,16 @@ class SoloPracticeAnalysisController {
     ResponseEntity<CoachingAdvice.View> advice(@PathVariable UUID id,
             @CookieValue(value = "echo_session", required = false) String cookie) {
         return ResponseEntity.ok().cacheControl(CacheControl.noStore()).body(analysis.advice(id.toString(), sessions.require(cookie).id()));
+    }
+
+    @PostMapping("/round-feedback")
+    ResponseEntity<CoachingAdvice.View> submitWholeReview(@PathVariable UUID id, @Valid @RequestBody WholeReview review,
+            @RequestHeader(value = "Origin", required = false) String from,
+            @CookieValue(value = "echo_session", required = false) String cookie) {
+        String owner = actor(from, cookie);
+        var feedback = WholeRoundFeedback.create(review.retellTags(), review.expressionTags(), review.note());
+        return ResponseEntity.ok().cacheControl(CacheControl.noStore())
+                .body(analysis.submitWholeReview(id.toString(), owner, feedback));
     }
 
     @PostMapping("/archive")

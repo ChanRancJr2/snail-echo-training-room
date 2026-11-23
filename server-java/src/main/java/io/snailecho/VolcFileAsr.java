@@ -13,8 +13,11 @@ import java.util.regex.Pattern;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 final class VolcFileAsr {
+    private static final Logger LOG = LoggerFactory.getLogger(VolcFileAsr.class);
     private static final int MAX_RESPONSE_BYTES = 512 * 1024;
     private static final int MAX_TRANSCRIPT_CHARS = 12000;
     private static final Pattern TASK_ID = Pattern.compile("[a-zA-Z0-9_-]{1,128}");
@@ -55,6 +58,7 @@ final class VolcFileAsr {
         }
         var reply = send("submit", requestId, body, true);
         if (!reply.ok() || !"20000000".equals(reply.code())) {
+            LOG.warn("Volc ASR submit rejected (HTTP {}, provider code {})", reply.httpStatus(), safeCode(reply.code()));
             throw new AsrFailure("VOLC_SUBMIT_REJECTED", reply.retryable() || "45000001".equals(reply.code()));
         }
         if (reply.body().length > 0) {
@@ -83,7 +87,12 @@ final class VolcFileAsr {
                 default: break;
             }
         }
+        LOG.warn("Volc ASR query rejected (HTTP {}, provider code {})", reply.httpStatus(), safeCode(reply.code()));
         throw new AsrFailure("VOLC_QUERY_REJECTED", reply.retryable());
+    }
+
+    private static String safeCode(String code) {
+        return code != null && code.matches("[0-9]{8}") ? code : "UNKNOWN";
     }
 
     private JsonNode parse(Reply reply) {

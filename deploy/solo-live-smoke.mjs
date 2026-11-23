@@ -24,7 +24,11 @@ async function request(path, { cookie, body, status = 200 } = {}) {
   if (body) headers.set('Origin', site.origin);
   if (typeof body === 'string') headers.set('Content-Type', 'application/json');
   const response = await fetch(new URL(path, site), { method, headers, body, redirect: 'error', signal: AbortSignal.timeout(30_000) });
-  assert.equal(response.status, status, `${method} ${path.replaceAll(analysisId, '{analysisId}')}`);
+  if (response.status !== status) {
+    const failure = await response.json().catch(() => null);
+    const code = /^[A-Z_]+$/.test(failure?.error ?? '') ? ` (${failure.error})` : '';
+    assert.equal(response.status, status, `${method} ${path.replaceAll(analysisId, '{analysisId}')}${code}`);
+  }
   return response;
 }
 
@@ -64,16 +68,17 @@ try {
     assert.equal(analyzed.status, 'ready', analyzed.failure ?? 'Speech analysis did not complete');
     assert.equal(analyzed.source, 'asr');
     assert.ok(analyzed.transcript?.includes(expectedPhrase), 'Recognized transcript did not match the fixture');
-    assert.ok(['ark', 'ark_partial'].includes(analyzed.provider), 'Semantic comparison did not use Ark');
+    assert.equal(analyzed.provider, 'ark', 'Semantic comparison must complete without a rules fallback');
     const issues = analyzed.comparison.issues;
     assert.ok(issues.length > 0, 'Use a fixture with an intentional omission to test model-generated advice');
-    const choices = issues.map(issue => ({ issueId: issue.id, resolution: 'misunderstanding' }));
-    await request(`${path}/advice`, { cookie, body: JSON.stringify({ choices }) });
+    await request(`${path}/round-feedback`, { cookie, body: JSON.stringify({
+      retellTags: ['遗漏重要信息'], expressionTags: [], note: '',
+    }) });
     const advice = await untilSettled(`${path}/advice`, cookie, 125_000);
     assert.equal(advice.status, 'ready');
     assert.deepEqual(Object.keys(advice.suggestions), ['listener']);
     assert.equal(advice.suggestions.listener.provider, 'ark');
-    assert.ok(choices.some(choice => choice.issueId === advice.suggestions.listener.evidenceId));
+    assert.ok(issues.some(issue => issue.id === advice.suggestions.listener.evidenceId));
     await request(`${path}/archive`, { cookie, body: JSON.stringify({ accepted: true }), status: 204 });
     const reports = await (await request('/api/practice/reports', { cookie })).json();
     const result = reports.find(report => report.id === analysisId);

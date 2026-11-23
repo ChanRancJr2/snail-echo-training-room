@@ -15,6 +15,19 @@ interface RoomMapper {
                  String speakerSessionId, String listenerSessionId, String speakerAudioId, String listenerAudioId,
                  String terminalReason, String teenRole) {}
     record DueRecording(String id, String roomId, long version) {}
+    record AsyncMessage(String id, String topic, String sender, String stage) {}
+
+    @Select("""
+        SELECT r.id, r.topic, s.nickname AS sender,
+            (SELECT CASE WHEN q.stage = 'ARCHIVED' AND NOT (q.listener_session_id <=> m.session_id)
+                         THEN NULL ELSE q.stage END
+             FROM rounds q WHERE q.room_id = r.id ORDER BY q.sequence_no DESC LIMIT 1) AS stage
+        FROM room_members m JOIN rooms r ON r.id = m.room_id
+        JOIN anonymous_sessions s ON s.id = r.owner_id
+        WHERE m.session_id = #{actor} AND m.role = 'listener' AND r.mode = 'async' AND r.status <> 'CLOSED'
+        ORDER BY r.id
+        """)
+    List<AsyncMessage> asyncMessages(String actor);
 
     String RECORDING_GRACE_CUTOFF = "TIMESTAMPADD(SECOND, -30, CURRENT_TIMESTAMP(6))";
 
@@ -108,6 +121,12 @@ interface RoomMapper {
 
     @Update("UPDATE invitations SET use_count = use_count + 1 WHERE id = #{id}")
     void consumeInvite(String id);
+
+    @Update("""
+        UPDATE invitations SET revoked_at = CURRENT_TIMESTAMP(6)
+        WHERE room_id = #{id} AND role = 'listener' AND use_count = 0 AND revoked_at IS NULL
+        """)
+    void revokeUnusedListenerInvites(String id);
 
     @Select("SELECT " + ROUND_COLUMNS + " FROM rounds WHERE room_id = #{id} ORDER BY sequence_no DESC LIMIT 1")
     Round latestRound(String id);

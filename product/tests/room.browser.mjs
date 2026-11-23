@@ -76,13 +76,11 @@ try {
   await host.getByRole('button', { name: '继续录音' }).click();
   await host.getByRole('button', { name: '结束录音' }).click();
   await host.getByRole('button', { name: '确认上传' }).waitFor();
-  await host.getByText('确认上传后会自动转写', { exact: true }).waitFor();
   await host.getByRole('button', { name: '删除录音，重新录入' }).click();
   await host.getByRole('button', { name: '开始录音' }).click();
   await host.getByRole('button', { name: '结束录音' }).waitFor();
   await host.waitForTimeout(1100);
   await host.getByRole('button', { name: '结束录音' }).click();
-  await host.getByText('确认上传后会自动转写', { exact: true }).waitFor();
   await host.getByRole('button', { name: '确认上传' }).click();
   await host.getByRole('heading', { name: '你真正想说的重点' }).waitFor();
   const transcript = await host.evaluate(async () => {
@@ -107,8 +105,7 @@ try {
   assert.ok(Date.parse(listenerRecording.deadlineAt) - Date.now() > 50_000);
   await guest.waitForTimeout(realAI ? 4500 : 1100);
   await guest.getByRole('button', { name: '结束录音' }).click();
-  assert.equal(await guest.getByRole('button', { name: '确认上传' }).isDisabled(), true);
-  await guest.getByLabel('我知晓复述录音提交后会被转写，用于本轮逐条对照。').check();
+  await guest.getByRole('button', { name: '确认上传并转写' }).waitFor();
   await guest.getByRole('button', { name: '确认上传' }).click();
   await host.getByRole('heading', { name: '先看差异' }).waitFor({ timeout: realAI ? 120000 : 15000 });
   const compared = await host.evaluate(async id => await (await fetch(`/api/rounds/${id}/comparison`)).json(), listenerRecording.roundId);
