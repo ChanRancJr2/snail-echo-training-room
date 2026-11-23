@@ -64,8 +64,7 @@ async function record(page, listener = false) {
   await page.getByRole('button', { name: '暂停录音' }).waitFor();
   await page.waitForTimeout(650);
   await click(page, '结束录音');
-  if (listener) await page.getByLabel('我知晓复述录音提交后会被转写，用于本轮逐条对照。').check();
-  await click(page, '确认上传');
+  await click(page, '确认上传并转写');
 }
 
 async function express(page) {
@@ -129,7 +128,6 @@ try {
   await click(asyncGuest, '开始录音');
   await asyncGuest.getByRole('button', { name: '暂停录音' }).waitFor();
   await asyncGuest.getByText('00:30', { exact: true }).waitFor({ timeout: 35_000 });
-  await asyncGuest.getByLabel('我知晓复述录音提交后会被转写，用于本轮逐条对照。').check();
   const preview = asyncGuest.locator('.recorder audio');
   await preview.evaluate(audio => new Promise((resolve, reject) => {
     if (audio.readyState >= 1) return resolve();
@@ -139,7 +137,7 @@ try {
   }));
   assert.ok(await preview.evaluate(audio => audio.duration) >= 28, 'playable fallback preserves the full recording');
   const wavUpload = asyncGuest.waitForRequest(request => request.method() === 'POST' && request.url().endsWith('/uploads'));
-  await click(asyncGuest, '确认上传');
+  await click(asyncGuest, '确认上传并转写');
   const fallback = (await wavUpload).postDataJSON();
   assert.equal(fallback.mimeType, 'audio/wav');
   assert.ok(fallback.byteSize >= 896_044);

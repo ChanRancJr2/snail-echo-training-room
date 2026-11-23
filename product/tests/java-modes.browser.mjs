@@ -47,9 +47,10 @@ async function record(page, listener = false) {
   await click(page, '开始录音');
   await page.locator('.record-time').getByText('00:01', { exact: true }).waitFor();
   await click(page, '结束录音');
-  if (listener) await page.getByRole('checkbox', { name: /我知晓复述录音提交后会被转写/ }).check();
+  await button(page, '确认上传并转写').waitFor();
+  if (listener) assert.equal(await page.getByRole('checkbox', { name: /我知晓复述录音提交后会被转写/ }).count(), 0);
   const response = page.waitForResponse(response => response.url().endsWith('/commit'));
-  await click(page, '确认上传');
+  await click(page, '确认上传并转写');
   assert.equal((await response).status(), 200);
 }
 
@@ -78,9 +79,10 @@ async function sameDevice(page, mode, isTeen) {
   await click(page, '播放表达者录音');
   await page.getByRole('button', { name: /暂停播放|已听过/ }).waitFor();
   await record(page, true);
-  await click(page, '请逐条标注');
-  const label = page.waitForResponse(response => response.url().endsWith('/review/label'));
-  await click(page, '确认');
+  await click(page, '开始整轮标注');
+  await page.getByLabel('语气被误解', { exact: true }).check();
+  const label = page.waitForResponse(response => response.url().endsWith('/review/round-labels'));
+  await click(page, '提交标注，查看建议');
   assert.equal((await label).status(), 200);
   await heading(page, '本轮建议').waitFor();
   assert.equal((await snapshot(page)).stage, 'ADVICE');
@@ -116,6 +118,7 @@ async function sameDevice(page, mode, isTeen) {
 async function asyncRoom(host, guest, early) {
   const { inviteToken, state } = await create(host, '异步留言练');
   await heading(host, '邀请搭档，开始游戏').waitFor();
+  assert.equal(await host.getByLabel('有效期').inputValue(), '0');
   assert.equal(await host.getByRole('button', { name: /^(复述者|观察者|准备好了)$/ }).count(), 0);
   const invitationUrl = await host.getByRole('textbox', {name: '邀请链接'}).inputValue();
   assert.equal(invitationUrl, `${origin}/#invite=${inviteToken}`);
@@ -151,15 +154,12 @@ async function asyncRoom(host, guest, early) {
   assert.equal((await guest.request.get(access)).status(), 200);
   if (!early) {
     await record(guest, true);
-    await click(host, '请表达者逐条标注');
-    await click(host, '提交标注，邀请双方确认');
-    await click(host, '确认这一条');
-    await guest.getByText('表达者：已确认 · 复述者：待确认', { exact: true }).waitFor();
-    const confirmed = guest.waitForResponse(response => response.url().endsWith('/review/confirm'));
-    await click(guest, '确认这一条');
-    assert.equal((await confirmed).status(), 200, 'the displayed confirmation and command must share a version');
-    await host.getByText('表达者：已确认 · 复述者：已确认', { exact: true }).waitFor();
-    await click(host, '表达者提交，查看改写建议');
+    await click(host, '开始整轮标注');
+    await heading(guest, '复述者澄清').waitFor();
+    await button(guest, '播放表达者录音').waitFor();
+    await button(guest, '播放复述者录音').waitFor();
+    await click(host, '提交标注');
+    await heading(guest, '给复述者的建议').waitFor();
     await click(host, '归档本轮并查看报告');
     await heading(guest, '本轮报告').waitFor();
     const hostUpload = host.locator('[data-recording-label="表达者录音"]').getByRole('button', { name: '上传素材库', exact: true });
@@ -170,6 +170,10 @@ async function asyncRoom(host, guest, early) {
     await guestUpload.click();
     await guest.getByRole('button', { name: '已同意上传', exact: true }).waitFor();
     assert.ok(await hostUpload.isEnabled());
+    await click(guest, '返回留言列表');
+    await heading(guest, '收到的异步留言').waitFor();
+    await guest.getByRole('button', { name: /本轮已完成$/ }).click();
+    await heading(guest, '本轮报告').waitFor();
   }
   await click(host, '结束并关闭训练室');
   await guest.getByText('训练室已关闭或会话已失效').waitFor();

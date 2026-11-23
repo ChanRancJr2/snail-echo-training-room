@@ -80,19 +80,15 @@ try {
   const compared = await get(`${round}/comparison`, host);
   assert.equal(compared.total, 2);
   assert.ok(compared.issues.some(item => !item.complete));
-  const labels = compared.issues.filter(item => !item.complete || !item.accurate)
-    .map(item => ({ issueId: item.id, tag: item.tag ?? '遗漏重要信息', resolution: 'misunderstanding' }));
-  let review = await post(`${round}/review/label`, host, { expectedVersion: state.roundVersion, labels });
-  for (const { issueId } of labels) {
-    review = await post(`${round}/review/confirm`, host, { expectedVersion: review.version, issueId });
-    review = await post(`${round}/review/confirm`, guest, { expectedVersion: review.version, issueId });
-  }
-  const report = await post(`${round}/review/submit`, host, { expectedVersion: review.version });
+  const review = await post(`${round}/review/open-round-review`, host, { expectedVersion: state.roundVersion });
+  assert.equal(review.stage, 'LISTENER_CLARIFICATION');
+  const report = await post(`${round}/review/round-labels`, host, { expectedVersion: review.version,
+    retellTags: ['遗漏重要信息'], expressionTags: [] });
   assert.equal(report.stage, 'ADVICE');
   const next = await post(`${room}/next-round`, host, { roundId: started.roundId, expectedVersion: report.version });
   assert.equal(next.stage, 'ARCHIVED');
   assert.equal(next.status, 'WAITING');
-  console.log('Real listener ASR, comparison, mutual confirmation, report and archive passed');
+  console.log('Real listener ASR, comparison, whole-round labeling, clarification, report and archive passed');
 } finally {
   await post(`${room}/leave`, host).catch(() => undefined);
 }

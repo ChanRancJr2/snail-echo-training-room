@@ -193,11 +193,23 @@ class RoomFlowTest {
             assertThat(choices).isNotEmpty();
             assertThat(post(path + "/advice", Map.of("choices", List.of()), cookie).statusCode()).isEqualTo(400);
             assertThat(post(path + "/advice", Map.of("choices", choices), session()).statusCode()).isEqualTo(404);
-            var suggestion = body(post(path + "/advice", Map.of("choices", choices), cookie));
+            var feedback = Map.of("retellTags", List.of("遗漏重要信息", "理解不到位"),
+                    "expressionTags", List.of("我表达不清"), "note", "我想再核对午饭时间");
+            assertThat(post(path + "/round-feedback", feedback, session()).statusCode()).isEqualTo(404);
+            assertThat(post(path + "/round-feedback", Map.of("retellTags", List.of("我表达不清"),
+                    "expressionTags", List.of()), cookie).statusCode()).isEqualTo(400);
+            var submitted = post(path + "/round-feedback", feedback, cookie);
+            assertThat(submitted.statusCode()).isEqualTo(200);
+            var suggestion = body(submitted);
             assertThat(suggestion.path("status").asText()).isEqualTo("ready");
             assertThat(suggestion.at("/suggestions/speaker").isMissingNode()).isTrue();
             assertThat(suggestion.at("/suggestions/listener/provider").asText()).isEqualTo("rules");
             assertThat(suggestion.at("/suggestions/listener/evidenceId").asText()).isEqualTo(choices.get(0).get("issueId"));
+            byte[] encrypted = database.queryForObject("SELECT input_data FROM rewrite_advice WHERE scope_id=?",
+                    byte[].class, "solo:" + id);
+            assertThat(new String(encrypted, StandardCharsets.UTF_8)).doesNotContain("我想再核对午饭时间");
+            assertThat(JSON.readTree(textVault.open("rewrite:solo:" + id + ":input", encrypted))
+                    .at("/feedback/note").asText()).isEqualTo("我想再核对午饭时间");
             assertThat(get(path + "/advice", session()).statusCode()).isEqualTo(404);
             assertThat(post(path + "/archive", Map.of("accepted", false), session())
                     .statusCode()).isEqualTo(404);
@@ -282,6 +294,43 @@ class RoomFlowTest {
         assertThat(post(room + "/ready", Map.of("ready", true), observer).statusCode()).isEqualTo(200);
         assertThat(post(room + "/leave", Map.of(), host).statusCode()).isEqualTo(200);
         assertThat(post("/api/rooms/join", Map.of("token", created.get("inviteToken").asText()), outsider).statusCode()).isEqualTo(410);
+    }
+
+    @Test void onlyAsyncListenersCanReceivePermanentLinksAndJoinedRoomsArePrivate() throws Exception {
+        String host = session();
+        String guest = session();
+        String outsider = session();
+        var sync = body(post("/api/rooms", Map.of("mode", "sync", "createKey", UUID.randomUUID()), host));
+        String syncInvites = "/api/rooms/" + sync.at("/state/id").asText() + "/invitations";
+        for (String role : List.of("listener", "observer")) {
+            assertThat(post(syncInvites, Map.of("role", role, "minutes", 0, "maxUses", 1), host).statusCode()).isEqualTo(400);
+        }
+        var ids = new java.util.ArrayList<String>();
+        for (String topic : List.of("家庭日常", "校园生活")) {
+            var created = body(post("/api/rooms", Map.of("mode", "async", "createKey", UUID.randomUUID(), "topic", topic), host));
+            String id = created.at("/state/id").asText();
+            ids.add(id);
+            assertThat(database.queryForObject("SELECT COUNT(*) FROM invitations WHERE room_id=? AND expires_at IS NULL",
+                    Integer.class, id)).isEqualTo(1);
+            String token = created.path("inviteToken").asText();
+            if (ids.size() == 2) {
+                var regenerated = post("/api/rooms/" + id + "/invitations",
+                        Map.of("role", "listener", "minutes", 0, "maxUses", 1), host);
+                assertThat(regenerated.statusCode()).isEqualTo(201);
+                assertThat(post("/api/rooms/join", Map.of("token", token), outsider).statusCode()).isEqualTo(410);
+                token = body(regenerated).path("token").asText();
+            }
+            assertThat(post("/api/rooms/join", Map.of("token", token), guest).statusCode()).isEqualTo(200);
+            assertThat(post("/api/rooms/join", Map.of("token", token), outsider).statusCode()).isEqualTo(410);
+        }
+        String list = "/api/rooms/async-messages";
+        assertThat(get(list, "").statusCode()).isEqualTo(401);
+        assertThat(body(get(list, outsider)).size()).isZero();
+        var inbox = body(get(list, guest));
+        assertThat(inbox.findValuesAsText("id")).containsExactlyInAnyOrderElementsOf(ids);
+        assertThat(inbox.findValues("token")).isEmpty();
+        assertThat(post("/api/rooms/" + ids.getFirst() + "/leave", Map.of(), host).statusCode()).isEqualTo(200);
+        assertThat(body(get(list, guest)).findValuesAsText("id")).containsExactly(ids.getLast());
     }
 
     @Test void openingTheAppAgainPreservesTheCurrentSession() throws Exception {
@@ -608,6 +657,13 @@ class RoomFlowTest {
         String review = path + "/review/";
         assertThat(get(path + "/comparison", session()).statusCode()).isEqualTo(403);
         assertThat(post(review + "label", label, fixture.listener()).statusCode()).isEqualTo(403);
+        assertThat(body(post(review + "label", label, fixture.speaker())).path("error").asText()).isEqualTo("WHOLE_ROUND_REQUIRED");
+        // Simulate a comparison persisted before the whole-round workflow was introduced.
+        String scope = "comparison:" + fixture.roundId();
+        var stored = comparisonMapper.load(fixture.roundId());
+        var previousReview = (com.fasterxml.jackson.databind.node.ObjectNode) JSON.readTree(textVault.open(scope, stored.ciphertext()));
+        previousReview.remove(List.of("wholeRoundRequired", "wholeRoundFeedback"));
+        comparisonMapper.save(fixture.roundId(), textVault.seal(scope, JSON.writeValueAsString(previousReview)));
         assertThat(post(review + "label", label, fixture.speaker()).statusCode()).isEqualTo(200);
         assertThat(post(review + "submit", Map.of("expectedVersion", reviewVersion + 1),
                 fixture.speaker()).statusCode()).isEqualTo(409);
@@ -642,6 +698,42 @@ class RoomFlowTest {
         assertThat(report.at("/total").asInt()).isZero();
         assertThat(database.queryForObject("SELECT COUNT(*) FROM round_comparisons WHERE round_id = ?",
                 Integer.class, fixture.roundId())).isEqualTo(1);
+    }
+
+    @Test void emptyKeyPointsAllowRetellingAndReviewWithoutScores() throws Exception {
+        var fixture = recordingRoom();
+        var speaker = uploadForProcessing(fixture, "speaker", fixture.speaker(), fixture.version(), true);
+        String path = fixture.path();
+        long version = speaker.at("/round/version").asLong();
+        var request = Map.of("expectedVersion", version, "points", List.of());
+        var confirmed = post(path + "/points/confirm", request, fixture.speaker());
+        assertThat(confirmed.statusCode()).isEqualTo(200);
+        assertThat(body(confirmed).at("/round/stage").asText()).isEqualTo("LISTENER_RETELL");
+        assertThat(body(confirmed).at("/points").size()).isZero();
+        assertThat(body(post(path + "/points/confirm", request, fixture.speaker()))).isEqualTo(body(confirmed));
+
+        var begun = body(post(path + "/restart-recording", Map.of("expectedVersion", version + 1, "kind", "listener"),
+                fixture.listener()));
+        uploadForProcessing(fixture, "listener", fixture.listener(), begun.get("version").asLong(), true);
+        org.awaitility.Awaitility.await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> {
+            worker.runOne();
+            comparisonWorker.sweep();
+            var response = get(path + "/comparison", fixture.speaker());
+            assertThat(response.statusCode()).isEqualTo(200);
+            var review = body(response);
+            assertThat(review.path("total").asInt()).isZero();
+            assertThat(review.path("provider").asText()).isEqualTo("no_points");
+        });
+        var reviewed = body(get(fixture.room(), fixture.speaker()));
+        var opened = body(post(path + "/review/open-round-review",
+                Map.of("expectedVersion", reviewed.path("roundVersion").asLong()), fixture.speaker()));
+        var advice = body(post(path + "/review/round-labels", Map.of("expectedVersion", opened.path("version").asLong(),
+                "retellTags", List.of(), "expressionTags", List.of()), fixture.speaker()));
+        assertThat(advice.path("stage").asText()).isEqualTo("ADVICE");
+        var archived = post(fixture.room() + "/next-round", Map.of("roundId", fixture.roundId(),
+                "expectedVersion", advice.path("version").asLong()), fixture.speaker());
+        assertThat(archived.statusCode()).isEqualTo(200);
+        assertThat(body(archived).path("stage").asText()).isEqualTo("ARCHIVED");
     }
 
     @Test void expiredComparisonReturnsRoomToWaitingWithoutProducingAReport() throws Exception {

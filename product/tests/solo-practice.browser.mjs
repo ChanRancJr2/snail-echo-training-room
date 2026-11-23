@@ -40,9 +40,9 @@ try {
       return route.fulfill({ status: 202 });
     }
     assert.ok(issued.has(id));
-    if (parts[5] === 'advice') {
+    if (parts[5] === 'round-feedback') {
       assert.equal(request.method(), 'POST');
-      assert.deepEqual(request.postDataJSON(), { choices: [{ issueId: item.id, resolution: 'misunderstanding' }] });
+      assert.deepEqual(request.postDataJSON(), { retellTags: ['遗漏重要信息', '理解不到位'], expressionTags: ['我表达不清'], note: '需要核对午饭条件' });
       return route.fulfill({ json: { status: 'ready', suggestions: {
         listener: { text: '复述时说清午饭成立的条件。', evidenceId: item.id, provider: 'ark' },
       } } });
@@ -60,8 +60,12 @@ try {
 
   await page.goto(origin);
   await loginWithNickname(page, '单人录音验收');
+  assert.deepEqual(await page.locator('.modes button strong').allTextContents(),
+    ['单人练习', '异步留言练', '双人同步练', '双座位自练', '亲子同机练']);
   await page.getByRole('button', { name: /^单人练习/ }).click();
   await heading('录音主题').waitFor();
+  assert.deepEqual(await page.getByRole('group', { name: '录音主题' }).getByRole('button').allTextContents(),
+    ['家庭日常', '校园生活', '疾病与需求', '工作需求', '兴趣爱好', '自定义填写']);
   assert.equal(await page.locator('audio').count(), 0);
   await button('开始练习').click();
   await heading('周六看望外婆').waitFor();
@@ -77,11 +81,10 @@ try {
   await page.getByText('00:01', { exact: true }).waitFor();
   await button('结束录音').click();
   const consent = page.getByRole('checkbox', { name: /我知晓复述录音提交后会被转写/ });
-  await consent.waitFor();
-  assert.ok(await button('确认上传').isDisabled());
+  await button('确认上传并转写').waitFor();
+  assert.equal(await consent.count(), 0);
   assert.equal(audioRequests, 0);
-  await consent.check();
-  await button('确认上传').click();
+  await button('确认上传并转写').click();
   await heading('先看差异').waitFor();
   await page.getByRole('alert').filter({ hasText: '未识别到清晰语音' }).waitFor();
   assert.equal(await page.locator('.comparison-grid').count(), 0);
@@ -93,8 +96,14 @@ try {
   await page.locator('.solo-pair dd').filter({ hasText: item.retell }).waitFor();
   assert.equal(await page.getByText(/示例复述/).count(), 0);
   await button('确认').click();
-  await heading('把误解逐条聊清楚').waitFor();
-  await page.getByLabel('结论', { exact: true }).selectOption('真误解');
+  await heading('整轮标注').waitFor();
+  await page.getByText(item.retell, { exact: true }).waitFor();
+  assert.equal(await page.locator('.round-recordings audio').count(), 2);
+  assert.equal(await page.getByLabel('结论', { exact: true }).count(), 0);
+  await page.getByLabel('遗漏重要信息', { exact: true }).check();
+  await page.getByLabel('理解不到位', { exact: true }).check();
+  await page.getByLabel('我表达不清', { exact: true }).check();
+  await page.getByLabel('补充澄清（选填）').fill('需要核对午饭条件');
   await button('提交，查看改写建议').click();
   await page.getByText('复述时说清午饭成立的条件。', { exact: true }).waitFor();
   await button('接纳这条建议').click();

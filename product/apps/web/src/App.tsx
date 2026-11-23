@@ -2,12 +2,10 @@ import { defineComponent, onErrorCaptured, onMounted, onUnmounted, ref } from 'v
 import { RoomFlow } from './RoomFlow.tsx';
 import { SoloPractice } from './SoloPractice.tsx';
 import { History, type RecordSummary } from './History.tsx';
-import { modes } from './flow.ts';
+import { availableModes } from './flow.ts';
 import { boundedFetch as fetch } from './client.ts';
 
 const javaDemo = import.meta.env.VITE_ECHO_TARGET === 'java';
-const practiceMode = ['practice', '单人练习', '选择录音主题，听完后用自己的话复述'] as const;
-const availableModes = [...modes, practiceMode];
 const maxNicknameLength = 20;
 
 interface Session {
@@ -152,7 +150,7 @@ const TrainingApp = defineComponent(() => {
   return () => {
     const showHome = session.value && !selected.value && !inRoom.value && !historyOpen.value;
     return <div class="shell">
-      <header class="top"><span class="mark" aria-hidden="true">↗</span><strong>蜗牛回声训练室</strong><span class="status">V1.2.1</span></header>
+      <header class="top"><span class="mark" aria-hidden="true">↗</span><strong>蜗牛回声训练室</strong><span class="status">V1.2.2</span></header>
       <main>
         {!window.isSecureContext && <p role="alert" class="notice">请通过 HTTPS 打开训练室，才能使用麦克风。</p>}
         {!session.value && <section class="login-screen" aria-labelledby="login-title">
@@ -173,7 +171,7 @@ const TrainingApp = defineComponent(() => {
         </section>}
         {session.value && <>
           {showHome && <><h1>让“听懂了”，<br /><em>变成真的听懂。</em></h1>
-            <p class="lead">先复述，不评价。逐条确认说出去的和听到的差在哪里。</p></>}
+            <p class="lead">先复述，不评价。对照说出去的和听到的差在哪里。</p></>}
           <p class="notice">已登录 · {session.value.nickname}</p>
           {showHome && <><h2>选择练法</h2>
             <div class="modes">{availableModes.map(([key, title, description]) => <button type="button" key={key} onClick={() => {

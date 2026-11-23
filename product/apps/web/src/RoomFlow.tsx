@@ -6,10 +6,11 @@ import { PointEditor } from './PointEditor.tsx';
 import { ComparisonView } from './ComparisonView.tsx';
 import { KeywordHints } from './KeywordHints.tsx';
 import { trackListenerEngagement } from './listener-engagement.ts';
-import { modes, nextPractice, roundStep } from './flow.ts';
+import { modes, nextPractice, roundStep, roundTopics } from './flow.ts';
 import { isSameDevice, type Mode, type Stage } from '../../../packages/core/src/round.ts';
 
 type Seat = 'speaker' | 'listener';
+type AsyncMessage = { id: string; topic: string; sender: string; stage: Stage | null };
 type Teen = { nickname: string; role: Seat; reportRole?: Seat | null; locked?: boolean; completed?: boolean };
 type Room = { id: string; version: number; mode: Mode; status: string; durationSeconds: number; retellStyle: string; topic: string; roundId: string | null; stage: Stage | null; terminalReason?: string | null; roundVersion: number | null; activeSeat: Seat | null; deadlineAt: string | null; speakerAudioId: string | null; listenerAudioId: string | null; previousPractice: { complete: number; total: number } | null; reportRole?: 'speaker' | 'listener' | 'observer' | null; teen: Teen | null; you: { role: 'speaker' | 'listener' | 'observer'; ready: boolean; owner?: boolean }; members: { id: string; nickname: string; role: string; ready: boolean }[] };
 const javaBackend = import.meta.env.VITE_ECHO_TARGET === 'java';
@@ -67,6 +68,7 @@ export const RoomFlow = defineComponent((props: RoomFlowProps) => {
     unlockOpen: false, unlockPin: '', task: null as { roundId: string; focus: string } | null, focus: '',
     labelingRound: null as string | null, handoffRound: null as string | null,
     capturingRound: null as string | null, reportDismissed: null as string | null,
+    asyncMessages: [] as AsyncMessage[], asyncListError: false, asyncListOpen: false,
   });
   function update<K extends keyof typeof state>(key: K, value: (typeof state)[K]) {
     state[key] = value;
@@ -102,7 +104,9 @@ export const RoomFlow = defineComponent((props: RoomFlowProps) => {
   };
 
   const refresh = async (id: string, isEntry = false) => {
-    applySnapshot(await call<Room>(`/api/rooms/${id}`), isEntry);
+    const room = await call<Room>(`/api/rooms/${id}`);
+    if (isEntry && javaBackend && room.mode === 'async') state.inviteMinutes = 0;
+    applySnapshot(room, isEntry);
     if (live) state.reconnecting = false;
   };
 
@@ -165,6 +169,24 @@ export const RoomFlow = defineComponent((props: RoomFlowProps) => {
     props.onRoomChange(true);
   };
 
+  function loadAsyncMessages() {
+    if (!javaBackend) return;
+    void call<AsyncMessage[]>('/api/rooms/async-messages').then(messages => {
+      if (live) Object.assign(state, { asyncMessages: messages, asyncListError: false });
+    }).catch(() => {
+      if (live) state.asyncListError = true;
+    });
+  }
+  watch([() => props.mode, () => state.room?.id, () => state.token], ([mode, id, token]) => {
+    if (!mode && !id && !token) loadAsyncMessages();
+  }, { immediate: true });
+
+  function returnToAsyncMessages() {
+    Object.assign(state, { room: null, asyncListOpen: true, reportDismissed: null });
+    history.replaceState({}, '', location.pathname);
+    props.onRoomChange(false);
+  }
+
   const create = () => void run(async () => {
     const mode = props.mode;
     const { durationSeconds, retellStyle, topic, customTopic, teenNickname, guardianPin, teenRole, guardianConsent } = state;
@@ -179,6 +201,7 @@ export const RoomFlow = defineComponent((props: RoomFlowProps) => {
     createKey = null;
     state.guardianPin = '';
     state.invite = result.inviteToken;
+    state.inviteMinutes = javaBackend && mode === 'async' ? 0 : 60;
     state.shareUrl = javaBackend && mode === 'async' && result.inviteToken ? invitationUrl(result.inviteToken) : '';
     enterRoom(result.state);
   });
@@ -275,11 +298,12 @@ export const RoomFlow = defineComponent((props: RoomFlowProps) => {
       : '返回训练室，准备下一轮';
     const recording = Boolean(room?.roundId && task?.roundId === room.roundId);
     const labeling = Boolean(room?.roundId && labelingRound === room.roundId);
-    const step = room?.stage && roundStep(room.stage, { recording, labeling, compactReview });
+    const step = room?.stage && roundStep(room.stage, { recording, labeling, compactReview,
+      wholeReview: javaBackend, role: roundRole });
     const needsHandoff = compactReview && room?.stage === 'LISTENER_RETELL' && handoffRound !== room.roundId;
     const listeningStep = room?.stage === 'LISTENER_RETELL' && !needsHandoff;
     const observing = roundRole === 'observer';
-    const observeConfirmation = observing && room?.stage === 'MUTUAL_CONFIRM';
+    const observeConfirmation = observing && !javaBackend && room?.stage === 'MUTUAL_CONFIRM';
     const observeComparison = observing && room?.stage === 'SPEAKER_LABELING';
     const teen = room?.teen;
     const childTurn = teen && (teen.role === 'speaker' ? ['TASK','SPEAKER_RECORDING','KEYPOINT_CONFIRM'].includes(room?.stage ?? '') : room?.stage === 'LISTENER_RETELL');
@@ -302,6 +326,16 @@ export const RoomFlow = defineComponent((props: RoomFlowProps) => {
       ? '本轮对照未能完成，请开始新一轮。' : '本轮已超时，请开始新一轮。';
     return <section class="room-flow">
       {error && <div role="alert" class="notice error">{error}</div>}
+      {javaBackend && !mode && !room && !token && !new URLSearchParams(location.search).has('room') &&
+        (state.asyncMessages.length > 0 || state.asyncListError || state.asyncListOpen) && <section class="card">
+          <h2>收到的异步留言</h2>
+          {state.asyncListError && <button class="secondary" onClick={loadAsyncMessages}>重新读取留言</button>}
+          {!state.asyncListError && !state.asyncMessages.length && <p>暂无已加入的异步留言。打开搭档的邀请链接后，留言会出现在这里。</p>}
+          {state.asyncMessages.map(message => <button type="button" key={message.id} class="secondary" disabled={busy}
+            onClick={() => void run(async () => enterRoom(await call<Room>(`/api/rooms/${message.id}`)))}>
+            {message.topic} · {message.sender} · {message.stage === 'ARCHIVED' ? '本轮已完成' : message.stage === 'ASYNC_PENDING' || message.stage === 'LISTENER_RETELL' ? '可以复述' : '查看进度'}
+          </button>)}
+        </section>}
       {room && reconnecting && <div role="status" class="notice">网络暂时中断，正在恢复训练室状态…</div>}
       {token && !room && (error ? <>
         <button class="secondary" onClick={join}>重新连接邀请</button>
@@ -314,7 +348,7 @@ export const RoomFlow = defineComponent((props: RoomFlowProps) => {
       </>
         : <p role="status" class="notice">正在打开训练室…</p>)}
       {!token && !room && mode && <div class="card"><h1 class="flow-title">{modes.find(([key]) => key === mode)?.[1]}</h1><p>选择本轮主题、发言时长和复述方式。</p>
-        <strong>本轮主题</strong><div class="option-grid">{['家庭日常', '大学生活', '疾病与需求', '工作需求', '自定义填写'].map(value => <button key={value} class={topic === value ? 'chosen' : ''} onClick={() => update('topic', value)}>{value}</button>)}</div>
+        <strong>本轮主题</strong><div class="option-grid">{roundTopics.map(value => <button key={value} aria-pressed={topic === value} class={topic === value ? 'chosen' : ''} onClick={() => update('topic', value)}>{value}</button>)}</div>
         {topic === '自定义填写' && <input aria-label="自定义主题" maxlength={80} placeholder="填写本轮主题" value={customTopic} onInput={event => update('customTopic', (event.target as HTMLInputElement | HTMLSelectElement).value)} />}
         <strong>每人发言时长</strong><div class="option-grid">{[[30, '30 秒'], [60, '1 分钟'], [120, '2 分钟'], [300, '5 分钟']].map(([value, label]) => <button key={value} class={durationSeconds === value ? 'chosen' : ''} onClick={() => update('durationSeconds', Number(value))}>{label}</button>)}</div>
         <strong>复述方式</strong><div class="option-grid">{[['auditory', '纯听觉'], ['keywords', '关键词辅助']].map(([value, label]) => <button key={value} class={retellStyle === value ? 'chosen' : ''} onClick={() => update('retellStyle', value as 'auditory' | 'keywords')}>{label}</button>)}</div>
@@ -344,6 +378,7 @@ export const RoomFlow = defineComponent((props: RoomFlowProps) => {
             {room.status === 'WAITING' && <button class={inviteRole === 'observer' ? 'chosen' : ''} onClick={() => { if (inviteRole !== 'observer') { update('inviteRole', 'observer'); update('invite', null); update('shareUrl', ''); } }}>观察者</button>}
           </div>}
           <label>有效期 <select value={inviteMinutes} onChange={event => update('inviteMinutes', Number((event.target as HTMLInputElement | HTMLSelectElement).value))}>
+            {asyncEntry && <option value={0}>永久有效</option>}
             <option value={60}>1 小时</option><option value={1440}>24 小时</option><option value={10080}>7 天</option>
           </select></label>
           <label><input type="checkbox" checked={inviteOnce} onChange={event => update('inviteOnce', (event.target as HTMLInputElement).checked)} /> 仅可使用一次</label>
@@ -397,7 +432,7 @@ export const RoomFlow = defineComponent((props: RoomFlowProps) => {
             }} />
           </>}
           {room.stage === 'LISTENER_RETELL' && roundRole === 'speaker' && <p role="status">等待复述者提交录音。</p>}
-          {['SPEAKER_LABELING', 'MUTUAL_CONFIRM', 'ADVICE', 'ARCHIVED'].includes(room.stage ?? '') &&
+          {['SPEAKER_LABELING', 'MUTUAL_CONFIRM', 'LISTENER_CLARIFICATION', 'ADVICE', 'ARCHIVED'].includes(room.stage ?? '') &&
             (room.stage !== 'ARCHIVED' || roundRole !== 'observer') &&
             <ComparisonView key={room.roundId} roundId={room.roundId} stage={room.stage!} version={room.roundVersion} role={roundRole ?? room.you.role} solo={sameDevice} compactReview={compactReview} atomicReview={javaBackend && compactReview} labeling={labeling} onLabeling={() => update('labelingRound', room.roundId)} onChanged={() => refresh(room.id)} />}
           {room.stage === 'ADVICE' && room.you.role === 'speaker' && <button class="primary" disabled={busy} onClick={prepareNext}>归档本轮并查看报告</button>}
@@ -414,6 +449,7 @@ export const RoomFlow = defineComponent((props: RoomFlowProps) => {
             })}>交换表达者与复述者</button>}
         </div>
       </>}
+      {room && asyncEntry && room.you.role === 'listener' && <button class="secondary" disabled={busy} onClick={returnToAsyncMessages}>返回留言列表</button>}
       {room && !guardianPanel && <button class="danger" disabled={busy} onClick={!javaBackend && teen?.locked ? () => update('unlockOpen', true) : leave}>{!javaBackend && teen?.locked ? '交还监护人' : ownsRoom ? '结束并关闭训练室' : '离开训练室'}</button>}
     </section>;
   };

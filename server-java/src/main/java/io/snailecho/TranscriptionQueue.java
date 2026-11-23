@@ -120,7 +120,8 @@ class TranscriptionQueue {
     private static boolean accepts(RoomMapper.Round round, String audioId) {
         if (audioId.equals(round.listenerAudioId())) return "COMPARING".equals(round.stage());
         return audioId.equals(round.speakerAudioId()) && switch (round.stage()) {
-            case "KEYPOINT_CONFIRM", "LISTENER_RETELL", "COMPARING" -> true;
+            case "KEYPOINT_CONFIRM", "ASYNC_PENDING", "LISTENER_RETELL", "COMPARING",
+                 "SPEAKER_LABELING", "MUTUAL_CONFIRM", "LISTENER_CLARIFICATION", "ADVICE" -> true;
             default -> false;
         };
     }

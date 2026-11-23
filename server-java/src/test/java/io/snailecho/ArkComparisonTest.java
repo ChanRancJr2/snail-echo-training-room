@@ -78,6 +78,19 @@ class ArkComparisonTest {
         assertThat(request[0].at("/messages/1/content").asText()).contains("周六上午十点出发");
     }
 
+    @Test void extractsVerbatimPointsWithoutASecondModelQuote() throws IOException {
+        String content = json.writeValueAsString(Map.of("points", List.of(
+                Map.of("category", "时间", "text", "周六上午出发"),
+                Map.of("category", "需求", "text", "订餐厅"),
+                Map.of("category", "因果", "text", "如果下雨，我们就坐地铁"))));
+        respond(200, json.writeValueAsString(Map.of("choices", List.of(
+                Map.of("finish_reason", "stop", "message", Map.of("content", content))))), null, null);
+
+        assertThat(ark.extract("周六上午出发。如果下雨，我们就坐地铁。")).containsExactly(
+                new PointService.Point("时间", "周六上午出发"),
+                new PointService.Point("因果", "如果下雨，我们就坐地铁"));
+    }
+
     @Test void rewriteUsesOnlyKnownEvidenceForTheRequestedRoles() throws IOException {
         var entries = List.of(new ArkComparison.CoachingEvidence("point-a", "先核对价格，再发报价。", "把报价发过去。",
                 "misunderstanding"));

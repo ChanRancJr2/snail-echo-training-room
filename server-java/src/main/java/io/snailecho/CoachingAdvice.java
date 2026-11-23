@@ -31,7 +31,7 @@ class CoachingAdvice {
 
     record Advice(String text, String evidenceId, String provider) {}
     record View(String status, Map<String, Advice> suggestions) {}
-    private record Request(List<ArkComparison.CoachingEvidence> evidence, List<String> roles) {}
+    private record Request(List<ArkComparison.CoachingEvidence> evidence, List<String> roles, WholeRoundFeedback feedback) {}
     private record Lease(String id, byte[] input, String token, Instant created) {}
 
     CoachingAdvice(JdbcTemplate db, PlatformTransactionManager transactions, TextVault vault, ObjectMapper json,
@@ -44,12 +44,16 @@ class CoachingAdvice {
     }
 
     void enqueue(String scope, List<ArkComparison.CoachingEvidence> evidence, List<String> roles) {
-        var request = new Request(evidence.stream().limit(6).toList(), roles);
+        enqueue(scope, evidence, roles, null);
+    }
+
+    void enqueue(String scope, List<ArkComparison.CoachingEvidence> evidence, List<String> roles, WholeRoundFeedback feedback) {
+        var request = new Request(evidence.stream().limit(6).toList(), roles, feedback);
         boolean useModel = ark.isPresent() && !request.evidence().isEmpty();
         db.update("""
             INSERT INTO rewrite_advice(scope_id,input_data,result_data) VALUES(?,?,?)
             ON DUPLICATE KEY UPDATE scope_id=scope_id
-            """, scope, useModel ? encode(scope + ":input", request) : null,
+            """, scope, useModel || feedback != null ? encode(scope + ":input", request) : null,
                 useModel ? null : encode(scope + ":result", fallback(request)));
     }
 
@@ -97,11 +101,11 @@ class CoachingAdvice {
 
     private Map<String, ArkComparison.CoachingSuggestion> generatedAdvice(Request request) {
         var provider = ark.orElseThrow();
-        var suggestions = new LinkedHashMap<>(ArkComparison.retryTransient(() -> provider.rewrite(request.evidence(), request.roles())));
+        var suggestions = new LinkedHashMap<>(ArkComparison.retryTransient(() -> provider.rewrite(request.evidence(), request.roles(), request.feedback())));
         if (request.roles().size() == 2 && suggestions.size() == 1) {
             var missing = request.roles().stream().filter(role -> !suggestions.containsKey(role)).toList();
             try {
-                suggestions.putAll(provider.rewrite(request.evidence(), missing));
+                suggestions.putAll(provider.rewrite(request.evidence(), missing, request.feedback()));
             } catch (ArkComparison.Failure failure) {
                 LOG.warn("Supplementary rewrite advice fell back to rules ({})", failure.getMessage());
             }
@@ -126,6 +130,10 @@ class CoachingAdvice {
             if (first == null) {
                 suggestion = speaker ? "每句话先说清一个主要意思，再单独说明时间和条件。"
                         : "复述后核对关键时间、条件和先后顺序。";
+                if (request.feedback() != null) {
+                    var tags = speaker ? request.feedback().expressionTags() : request.feedback().retellTags();
+                    if (!tags.isEmpty()) suggestion = "本轮标记了「" + tags.getFirst() + "」。" + suggestion;
+                }
             } else {
                 suggestion = (speaker ? "先说清这一点的背景和条件：" : "复述后用自己的话核对这一点：") + first.original();
             }

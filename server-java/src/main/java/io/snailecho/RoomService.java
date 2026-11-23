@@ -61,7 +61,7 @@ public class RoomService {
         String id = uuid();
         database.insertRoom(id, actor, key, seconds, style, topic, mode, teenNickname, teenRole);
         database.insertMember(uuid(), id, actor, "speaker", null);
-        var invitation = sameDevice(mode) ? null : newInvite(id, "listener", 1440, 1, null);
+        var invitation = sameDevice(mode) ? null : newInvite(id, "listener", "async".equals(mode) ? 0 : 1440, 1, null);
         return new CreateResult(state(database.room(id), actor, database.members(id)),
                 invitation == null ? null : invitation.token(), true);
     }
@@ -80,7 +80,9 @@ public class RoomService {
         if (sameDevice(room.mode()) || ("async".equals(room.mode()) && !"listener".equals(role))) {
             throw new ApiFailure(403, "INVITE_UNAVAILABLE");
         }
+        if (minutes == 0 ? !("async".equals(room.mode()) && "listener".equals(role)) : minutes < 5) throw invalid();
         if (!canInvite(room)) throw new ApiFailure(409, "ROOM_NOT_WAITING");
+        if ("async".equals(room.mode())) database.revokeUnusedListenerInvites(roomId);
         return newInvite(roomId, role, minutes, maxUses, password);
     }
 
@@ -88,7 +90,8 @@ public class RoomService {
         if (password != null && password.getBytes(StandardCharsets.UTF_8).length > 72) throw invalid();
         String hash = password == null ? null : passwordEncoder.encode(password);
         String token = SessionService.newToken();
-        var invitation = new RoomMapper.Invite(uuid(), roomId, role, hash, Instant.now().plus(minutes, ChronoUnit.MINUTES), maxUses, 0);
+        Instant expiresAt = minutes == 0 ? null : Instant.now().plus(minutes, ChronoUnit.MINUTES);
+        var invitation = new RoomMapper.Invite(uuid(), roomId, role, hash, expiresAt, maxUses, 0);
         database.insertInvite(invitation, SessionService.hash(token));
         return new PublicInvite(token, role, minutes, maxUses);
     }
@@ -108,7 +111,10 @@ public class RoomService {
         var existing = members.stream().filter(m -> m.sessionId().equals(actor)).findFirst().orElse(null);
         if (existing != null && invitation.id().equals(existing.invitationId())
                 && invitation.role().equals(existing.role())) return state(room, actor, members);
-        if (!invitation.expiresAt().isAfter(Instant.now()) || invitation.useCount() >= invitation.maxUses()) {
+        if ("async".equals(room.mode()) && members.stream().noneMatch(m -> room.ownerId().equals(m.sessionId()))) {
+            throw new ApiFailure(410, "INVITATION_EXPIRED");
+        }
+        if ((invitation.expiresAt() != null && !invitation.expiresAt().isAfter(Instant.now())) || invitation.useCount() >= invitation.maxUses()) {
             throw new ApiFailure(410, "INVITATION_EXPIRED");
         }
         String role = invitation.role();
@@ -123,6 +129,11 @@ public class RoomService {
         database.consumeInvite(invitation.id());
         database.advanceVersion(roomId);
         return state(database.room(roomId), actor, database.members(roomId));
+    }
+
+    @Transactional(readOnly = true)
+    public List<RoomMapper.AsyncMessage> asyncMessages(String actor) {
+        return database.asyncMessages(actor);
     }
 
     public State ready(String roomId, String actor, boolean ready) {

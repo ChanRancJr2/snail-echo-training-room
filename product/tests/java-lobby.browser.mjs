@@ -132,8 +132,8 @@ try {
         await guest.getByRole('button', { name: '结束录音' }).click();
         const submit = guest.getByRole('button', { name: '确认上传' });
         await submit.waitFor();
-        assert.equal(await submit.isDisabled(), true);
-        await guest.getByRole('checkbox', { name: /我知晓复述录音提交后会被转写/ }).check();
+        assert.equal(await submit.isEnabled(), true);
+        assert.equal(await guest.getByRole('checkbox', { name: /我知晓复述录音提交后会被转写/ }).count(), 0);
         const comparisonCommit = guest.waitForResponse(response => response.url().endsWith('/commit') && response.ok());
         await submit.click();
         assert.equal((await (await comparisonCommit).json()).round.stage, 'COMPARING');
@@ -146,32 +146,37 @@ try {
           await observer.getByRole('button', { name: '播放复述者录音' }).click();
           await observer.waitForFunction(() => (document.querySelector('.audio-player audio')?.currentTime ?? 0) > 0);
         }
-        await host.getByRole('button', { name: '请表达者逐条标注' }).click();
-        await host.getByRole('combobox', { name: /结论/ }).selectOption('expression');
-        await host.getByRole('button', { name: '提交标注，邀请双方确认' }).click();
-        const reviewSubmit = host.getByRole('button', { name: '表达者提交，查看改写建议' });
-        await reviewSubmit.waitFor();
+        await host.getByRole('button', { name: '开始整轮标注' }).click();
+        await host.getByRole('heading', { name: '表达者整轮标注' }).waitFor();
+        await guest.getByRole('heading', { name: '复述者澄清' }).waitFor();
+        const initial = await (await guest.request.get(`${origin}/api/rounds/${snapshot.roundId}/comparison`)).json();
+        await guest.getByLabel('补充澄清（选填）').fill('我想再核对聚餐前提');
+        await guest.getByRole('button', { name: '保存澄清', exact: true }).click();
+        await guest.getByText('澄清已保存。').waitFor();
+        const saved = await (await guest.request.get(`${origin}/api/rounds/${snapshot.roundId}/comparison`)).json();
+        assert.equal(saved.version, initial.version, 'saving a note must not invalidate the speaker’s form');
+        assert.equal(saved.wholeRoundFeedback.note, '我想再核对聚餐前提');
+        await guest.reload();
+        assert.equal(await guest.getByLabel('补充澄清（选填）').inputValue(), '我想再核对聚餐前提');
+        await host.getByLabel('遗漏重要信息', { exact: true }).check();
+        await host.getByLabel('理解不到位', { exact: true }).check();
+        await host.getByLabel('我表达不清', { exact: true }).check();
+        assert.equal(await guest.locator('.round-recordings audio').count(), 2);
+        assert.equal(await guest.getByRole('button', { name: '确认这一条' }).count(), 0);
+        const reviewed = await (await guest.request.get(`${origin}/api/rounds/${snapshot.roundId}/comparison`)).json();
+        const denied = await host.request.post(`${origin}/api/rounds/${snapshot.roundId}/review/round-clarification`, {
+          headers: { Origin: origin }, data: { expectedVersion: reviewed.version, note: 'forbidden' },
+        });
+        assert.equal(denied.status(), 403);
         if (observer) {
-          await observer.getByRole('heading', { name: '把误解逐条聊清楚' }).waitFor();
+          await observer.getByRole('heading', { name: '查看本轮回顾' }).waitFor();
           assert.deepEqual(await observer.locator('.round-content .audio-player').evaluateAll(players => players.map(player => player.dataset.recordingLabel)), ['表达者录音', '复述者录音']);
-          for (const note of ['可以问清聚餐前提', '建议再听一遍原句']) {
-            await observer.getByRole('textbox', { name: '第 1 条观察建议' }).fill(note);
-            await observer.getByRole('button', { name: '提交观察建议' }).click();
-            await host.getByText(new RegExp('观察者建议.*' + note)).waitFor();
-          }
+          assert.equal(await observer.getByLabel('补充澄清（选填）').count(), 0);
         }
-        assert.equal(await reviewSubmit.isDisabled(), true);
-        await guest.getByText('待双方确认的结论：表达问题').waitFor();
-        for (const note of ['我听到的是另一个安排', '我仍想核对原话']) {
-          await guest.getByRole('textbox', { name: '第 1 条澄清' }).fill(note);
-          await guest.getByRole('button', { name: '提交澄清' }).click();
-          await host.getByText('复述者澄清：' + note).waitFor();
-        }
-        await host.getByRole('button', { name: '确认这一条' }).click();
-        assert.equal(await guest.getByRole('button', { name: '表达者提交，查看改写建议' }).count(), 0);
-        await reviewSubmit.click();
+        await host.getByRole('button', { name: '提交标注', exact: true }).click();
         await host.getByRole('heading', { name: '给表达者的建议' }).waitFor();
         await guest.getByRole('heading', { name: '给复述者的建议' }).waitFor();
+        assert.equal(await host.getByRole('heading', { name: '等待复述者澄清' }).count(), 0);
         if (observer) {
           await observer.getByRole('heading', { name: '给表达者的建议' }).waitFor();
           await observer.getByRole('heading', { name: '给复述者的建议' }).waitFor();
@@ -190,7 +195,7 @@ try {
         await host.getByRole('button', { name: '已采纳' }).waitFor();
         await host.getByRole('button', { name: '归档本轮并查看报告' }).click();
         await guest.getByText('本轮报告已归档。').waitFor();
-        await guest.getByText('1 条未达成一致，不计入本轮结果。').waitFor();
+        await guest.getByText('澄清：我想再核对聚餐前提').waitFor();
         const ownRecording = (page, label) => page.locator(`.report-media [data-recording-label="${label}"]`);
         const hostConsent = ownRecording(host, '表达者录音').getByRole('button', { name: '上传素材库', exact: true });
         const guestConsent = ownRecording(guest, '复述者录音').getByRole('button', { name: '上传素材库', exact: true });
@@ -232,7 +237,7 @@ try {
         assert.equal(next.stage, 'TASK');
         assert.equal(next.deadlineAt, null);
         assert.notEqual(next.roundId, snapshot.roundId);
-        assert.equal(next.previousPractice, null);
+        assert.equal(next.previousPractice.total, 1);
       }
     }
     await host.getByRole('button', { name: '结束并关闭训练室' }).click();
@@ -253,7 +258,7 @@ try {
   assert.notEqual((await (await a.request.get(`${origin}/api/me`)).json()).id, account.id);
   console.log('Three Java browser sessions passed: startup, reload, recording, re-recording and reversed roles in a fresh room.');
   if (verifyUpload) console.log('Both browser recordings reached confirmed storage and authorized range playback.');
-  if (verifyProcessing) console.log('Both practice rooms passed Mock transcription, comparison, mutual confirmation, anonymous export and same-room restart.');
+  if (verifyProcessing) console.log('Both practice rooms passed mock transcription, comparison, whole-round feedback, anonymous export and same-room restart.');
 } finally {
   await browser.close();
 }

@@ -20,7 +20,7 @@ import org.springframework.transaction.annotation.Transactional;
 @ConditionalOnProperty(name = "echo.processing.enabled", havingValue = "true")
 @Transactional(isolation = Isolation.READ_COMMITTED)
 class ComparisonService {
-    private static final Set<String> REVIEW_STAGES = Set.of("SPEAKER_LABELING", "MUTUAL_CONFIRM");
+    private static final Set<String> REVIEW_STAGES = Set.of("SPEAKER_LABELING", "MUTUAL_CONFIRM", "LISTENER_CLARIFICATION");
     private static final Pattern SENTENCE = Pattern.compile("[^。！？!?\\r\\n]+[。！？!?]?");
     private static final Pattern PUNCTUATION = Pattern.compile("[\\p{P}\\s]+", Pattern.UNICODE_CHARACTER_CLASS);
     private static final int MAX_PROVIDER_ATTEMPTS = 2;
@@ -71,7 +71,9 @@ class ComparisonService {
         updated.add(item);
         return updated;
     }
-    record Review(List<Item> items, boolean adviceAccepted, String provider, boolean listenerAdviceAccepted) {}
+    record Review(List<Item> items, boolean adviceAccepted, String provider, boolean listenerAdviceAccepted,
+                  WholeRoundFeedback wholeRoundFeedback, boolean wholeRoundRequired) {}
+    record RecordingIds(String speaker, String listener) {}
     record Label(String issueId, String tag, String resolution) {}
     record Issue(String id, String category, String original, String speakerQuote, String listenerQuote,
                  boolean complete, boolean accurate, String tag, String clarification, String resolution,
@@ -85,12 +87,12 @@ class ComparisonService {
                     item.feedback().listenerNotes(), item.feedback().observations());
         }
     }
-    record Transcripts(String speaker, String listener) {}
+    record Transcripts(String speaker, String listener, boolean speakerPending) {}
     record Report(String topic, String focus, String speaker, String listener, String speakerAudioId,
                   String listenerAudioId, int hintLevel) {}
     record View(int total, long complete, long accurate, List<Issue> issues, boolean adviceAccepted,
                 Transcripts transcripts, Report report, String provider, int excluded, boolean listenerAdviceAccepted,
-                CoachingAdvice.View advice, long version) {}
+                CoachingAdvice.View advice, long version, WholeRoundFeedback wholeRoundFeedback, RecordingIds recordings) {}
     record Practice(long complete, int total) {}
     record Updated(String id, String stage, long version) {}
     record LeasedComparison(ComparisonMapper.Candidate candidate, String token, List<ArkComparison.Point> points,
@@ -127,8 +129,12 @@ class ComparisonService {
         var listenerJob = round.listenerAudioId() == null ? null : transcripts.byId(round.listenerAudioId());
         String listener = transcript(listenerJob);
         var confirmed = points.list(round.id());
-        if (listener == null || confirmed.isEmpty()) {
+        if (listener == null) {
             cancelComparison(candidate.roomId(), round);
+            return null;
+        }
+        if (confirmed.isEmpty()) {
+            storeComparison(candidate, round, List.of(), "no_points");
             return null;
         }
         boolean mock = !"volc".equals(listenerJob.provider());
@@ -199,7 +205,7 @@ class ComparisonService {
 
     private void storeComparison(ComparisonMapper.Candidate candidate, RoomMapper.Round round, List<Item> items,
                                  String provider) {
-        comparisons.insert(round.id(), seal(round.id(), new Review(items, false, provider, false)));
+        comparisons.insert(round.id(), seal(round.id(), new Review(items, false, provider, false, null, true)));
         advance(round, "SPEAKER_LABELING");
         rooms.advanceVersion(candidate.roomId());
     }
@@ -238,7 +244,7 @@ class ComparisonService {
         } catch (IllegalStateException unreadableReport) {
             return null;
         }
-        var scored = review.items().stream().filter(ComparisonService::countsInResults).toList();
+        var scored = scoredItems(review);
         return review.adviceAccepted() && !scored.isEmpty()
                 ? new Practice(scored.stream().filter(Item::complete).count(), scored.size()) : null;
     }
@@ -253,16 +259,13 @@ class ComparisonService {
         }
         var review = load(id);
         var items = review.items();
-        var scored = archived || "ADVICE".equals(round.stage())
-                ? items.stream().filter(ComparisonService::countsInResults).toList() : items;
+        var scored = archived || "ADVICE".equals(round.stage()) ? scoredItems(review) : items;
         long complete = scored.stream().filter(Item::complete).count();
         long accurate = scored.stream().filter(Item::accurate).count();
-        Transcripts texts = null;
-        if (archived || complete == items.size() && accurate == items.size()) {
-            String speaker = transcript(round.speakerAudioId());
-            String listener = transcript(round.listenerAudioId());
-            if (speaker != null && listener != null) texts = new Transcripts(speaker, listener);
-        }
+        boolean observer = "observer".equals(access.role());
+        var speakerJob = observer || round.speakerAudioId() == null ? null : transcripts.byId(round.speakerAudioId());
+        boolean speakerPending = !archived && speakerJob != null && Set.of("PENDING", "RUNNING").contains(speakerJob.status());
+        var texts = observer ? null : new Transcripts(transcript(speakerJob), transcript(round.listenerAudioId()), speakerPending);
         Report report = null;
         if (archived) {
             var details = comparisons.report(id);
@@ -276,7 +279,44 @@ class ComparisonService {
         }
         return new View(scored.size(), complete, accurate, items.stream().map(Issue::new).toList(),
                 review.adviceAccepted(), texts, report, review.provider() == null ? "mock" : review.provider(),
-                items.size() - scored.size(), review.listenerAdviceAccepted(), coaching, round.version());
+                items.size() - scored.size(), review.listenerAdviceAccepted(), coaching, round.version(),
+                observer ? null : review.wholeRoundFeedback(), new RecordingIds(round.speakerAudioId(), round.listenerAudioId()));
+    }
+
+    private static List<Item> scoredItems(Review review) {
+        return review.wholeRoundFeedback() != null ? review.items()
+                : review.items().stream().filter(ComparisonService::countsInResults).toList();
+    }
+
+    public Updated labelWholeRound(String id, String actor, long version, List<String> retell, List<String> expression) {
+        var access = edit(id, actor, version, "speaker", "SPEAKER_LABELING", "MUTUAL_CONFIRM", "LISTENER_CLARIFICATION");
+        if (!RoomService.sameDevice(access.room().mode()) && "SPEAKER_LABELING".equals(access.round().stage())) {
+            throw new ApiFailure(409, "WRONG_STAGE");
+        }
+        var review = load(id);
+        var prior = review.wholeRoundFeedback();
+        var feedback = WholeRoundFeedback.create(retell, expression, prior == null ? "" : prior.note());
+        return persist(access, new Review(review.items(), review.adviceAccepted(), review.provider(),
+                review.listenerAdviceAccepted(), feedback, true), "ADVICE");
+    }
+
+    public Updated openWholeRoundReview(String id, String actor, long version) {
+        var access = edit(id, actor, version, "speaker", "SPEAKER_LABELING");
+        if (RoomService.sameDevice(access.room().mode())) throw new ApiFailure(409, "WRONG_STAGE");
+        return persist(access, load(id), "LISTENER_CLARIFICATION");
+    }
+
+    public Updated clarifyWholeRound(String id, String actor, long version, String note) {
+        var access = edit(id, actor, version, "listener", "LISTENER_CLARIFICATION", "MUTUAL_CONFIRM");
+        var review = load(id);
+        var prior = review.wholeRoundFeedback();
+        var feedback = WholeRoundFeedback.create(prior == null ? List.of() : prior.retellTags(),
+                prior == null ? List.of() : prior.expressionTags(), note);
+        // The room lock serializes this write with label submission. Saving a note
+        // keeps the shared step version unchanged so the speaker's form stays valid.
+        comparisons.save(id, seal(id, new Review(review.items(), review.adviceAccepted(), review.provider(),
+                review.listenerAdviceAccepted(), feedback, true)));
+        return current(access.round());
     }
 
     private static boolean countsInResults(Item item) {
@@ -286,6 +326,7 @@ class ComparisonService {
     public Updated label(String id, String actor, long version, List<Label> labels) {
         var access = edit(id, actor, version, "speaker", "SPEAKER_LABELING");
         var review = load(id);
+        if (review.wholeRoundRequired()) throw new ApiFailure(409, "WHOLE_ROUND_REQUIRED");
         var problemIds = review.items().stream().filter(Item::problem).map(Item::id).collect(Collectors.toSet());
         var submitted = labels.stream().map(Label::issueId).collect(Collectors.toSet());
         if (submitted.size() != labels.size() || !submitted.equals(problemIds)) {
@@ -339,7 +380,7 @@ class ComparisonService {
         boolean speaker = "speaker".equals(access.role());
         if (speaker ? review.adviceAccepted() : review.listenerAdviceAccepted()) return current(access.round());
         return persist(access, new Review(review.items(), speaker || review.adviceAccepted(), review.provider(),
-                !speaker || review.listenerAdviceAccepted()), "ADVICE");
+                !speaker || review.listenerAdviceAccepted(), review.wholeRoundFeedback(), review.wholeRoundRequired()), "ADVICE");
     }
 
     private Updated changeIssue(Access access, String issueId, UnaryOperator<Feedback> change) {
@@ -355,7 +396,8 @@ class ComparisonService {
             var item = items.get(i);
             if (item.id().equals(issueId) && item.problem()) {
                 items.set(i, item.withFeedback(change.apply(item.feedback())));
-                return new Review(List.copyOf(items), review.adviceAccepted(), review.provider(), review.listenerAdviceAccepted());
+                return new Review(List.copyOf(items), review.adviceAccepted(), review.provider(),
+                        review.listenerAdviceAccepted(), review.wholeRoundFeedback(), review.wholeRoundRequired());
             }
         }
         throw new ApiFailure(404, "ISSUE_NOT_FOUND");
@@ -392,11 +434,11 @@ class ComparisonService {
         var round = access.round();
         comparisons.save(round.id(), seal(round.id(), review));
         if ("ADVICE".equals(stage) && !"ADVICE".equals(round.stage())) {
-            var evidence = review.items().stream().filter(Item::problem).filter(ComparisonService::countsInResults)
-                    .filter(item -> !"ai_error".equals(item.feedback().resolution()))
+            var evidence = scoredItems(review).stream().filter(Item::problem)
+                    .filter(item -> review.wholeRoundFeedback() != null || !"ai_error".equals(item.feedback().resolution()))
                     .map(item -> new ArkComparison.CoachingEvidence(item.id(), item.original(), item.listenerQuote(),
-                            item.feedback().resolution())).toList();
-            advice.enqueue("room:" + round.id(), evidence, List.of("speaker", "listener"));
+                            review.wholeRoundFeedback() == null ? item.feedback().resolution() : "system_detected")).toList();
+            advice.enqueue("room:" + round.id(), evidence, List.of("speaker", "listener"), review.wholeRoundFeedback());
         }
         advance(round, stage);
         rooms.advanceVersion(access.room().id());

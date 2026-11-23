@@ -47,7 +47,7 @@ class ListenerEngagementController {
                 SELECT 1 FROM rounds r JOIN rooms rm ON rm.id = r.room_id
                 WHERE r.id = ? AND rm.mode = 'sync' AND r.listener_session_id = ?
                     AND r.speaker_audio_id IS NOT NULL
-                    AND r.stage IN ('LISTENER_RETELL', 'COMPARING', 'SPEAKER_LABELING', 'MUTUAL_CONFIRM', 'ADVICE', 'ARCHIVED', 'CANCELLED')
+                    AND r.stage IN ('LISTENER_RETELL', 'COMPARING', 'SPEAKER_LABELING', 'MUTUAL_CONFIRM', 'LISTENER_CLARIFICATION', 'ADVICE', 'ARCHIVED', 'CANCELLED')
             )
             """, Boolean.class, roundId.toString(), actor);
         if (!Boolean.TRUE.equals(eligible)) throw new ApiFailure(403, "FORBIDDEN_ROLE");

@@ -88,7 +88,11 @@ class S3AudioStorage {
             client.putObject(r -> r.bucket(bucket).key(key).contentType("audio/mpeg")
                     .cacheControl("private, no-store"), RequestBody.fromBytes(mp3));
             return asrDownloadUrl(key);
+        } catch (S3Exception failure) {
+            LOG.warn("ASR staging upload rejected by object storage (HTTP {})", failure.statusCode());
+            throw new AsrFailure("ASR_STORAGE_UNAVAILABLE", true);
         } catch (SdkException failure) {
+            LOG.warn("ASR staging upload failed ({})", failure.getClass().getSimpleName());
             throw new AsrFailure("ASR_STORAGE_UNAVAILABLE", true);
         }
     }

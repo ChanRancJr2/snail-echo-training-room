@@ -15,7 +15,7 @@ const uploadMessages: Record<string, string> = {
   ROUND_NOT_FOUND: '本轮已结束，请返回训练室开始下一轮。',
   ROOM_NOT_ACTIVE: '本轮已结束，请返回训练室开始下一轮。',
   WRONG_STAGE: '本轮录音阶段已结束，请检查训练室状态。',
-  CONSENT_REQUIRED: '请先确认复述录音转写说明。',
+  CONSENT_REQUIRED: '请重新点击「确认上传并转写」。',
   RATE_LIMITED: '上传操作太频繁，请稍后重试。',
 };
 
@@ -43,7 +43,6 @@ export const Recorder = defineComponent({
     const preview = ref<string | null>(null);
     const seconds = ref(0);
     const error = ref('');
-    const listenerConsent = ref(false);
     const recordedMs = () => elapsed + (resumedAt === null ? 0 : performance.now() - resumedAt);
 
     watch([state, () => props.maxSeconds], ([status, maxSeconds], _, onCleanup) => {
@@ -165,7 +164,6 @@ export const Recorder = defineComponent({
       seconds.value = 0;
       state.value = 'idle';
       error.value = '';
-      listenerConsent.value = false;
       idempotencyKey = null;
     }
 
@@ -173,8 +171,7 @@ export const Recorder = defineComponent({
       const recording = audio;
       if (!recording || state.value !== 'ready') return;
       const { roundId, kind, onCommitted, onSubmitRecording } = props;
-      const consentToTranscribe = kind === 'listener' && listenerConsent.value;
-      if (kind === 'listener' && !consentToTranscribe) return;
+      const consentToTranscribe = kind === 'listener';
       state.value = 'uploading';
       error.value = '';
       try {
@@ -211,12 +208,9 @@ export const Recorder = defineComponent({
       {(state.value === 'recording' || state.value === 'paused' || state.value === 'ready') && <button class="secondary" onClick={remove}>删除录音，重新录入</button>}
       {state.value === 'ready' && <>
         <audio controls src={preview.value ?? ''} />
-        {!props.onSubmitRecording && props.kind === 'speaker' && <div class="transcription-choice">确认上传后会自动转写</div>}
-        {props.kind === 'listener' && <label class="transcription-consent"><input type="checkbox" checked={listenerConsent.value} onChange={event => { listenerConsent.value = (event.currentTarget as HTMLInputElement).checked; }} /> 我知晓复述录音提交后会被转写，用于本轮逐条对照。</label>}
-        <button class="primary" disabled={props.kind === 'listener' && !listenerConsent.value} onClick={() => void upload()}>确认上传</button>
+        <button class="primary" onClick={() => void upload()}>确认上传并转写</button>
       </>}
       {state.value === 'uploading' && <p>正在上传并确认，请稍候…</p>}
-      {props.kind === 'speaker' && state.value !== 'ready' && <p>确认上传后自动转写，可在本轮信息点页面查看。</p>}
     </section>;
   },
 });

@@ -113,19 +113,23 @@ async function run(mode) {
     const reviewed = await poll(() => get(room, speaker), item => ['SPEAKER_LABELING', 'CANCELLED'].includes(item.stage), 'listener ASR and Ark comparison');
     assert.equal(reviewed.stage, 'SPEAKER_LABELING');
     const comparison = await get(`${round}/comparison`, speaker);
-    assert.ok(['ark', 'ark_partial'].includes(comparison.provider), `Unexpected comparison provider: ${comparison.provider}`);
+    assert.equal(comparison.provider, 'ark', 'Semantic comparison must complete without a rules fallback');
+    assert.equal(comparison.version, reviewed.roundVersion);
     const issues = comparison.issues.filter(item => !item.complete || !item.accurate);
     assert.ok(issues.length > 0, 'The retell fixture should omit the confirmed point');
-    let step = await post(`${round}/review/label`, speaker, { expectedVersion: reviewed.roundVersion,
-      labels: issues.map(item => ({ issueId: item.id, tag: '遗漏重要信息', resolution: 'misunderstanding' })) });
+    let labelVersion = reviewed.roundVersion;
+    const clarification = '验收样本需要核对原表达的条件。';
     if (!sameDevice) {
-      for (const item of issues) {
-        for (const actor of [speaker, listener]) {
-          step = await post(`${round}/review/confirm`, actor, { expectedVersion: step.version, issueId: item.id });
-        }
-      }
-      step = await post(`${round}/review/submit`, speaker, { expectedVersion: step.version });
+      const opened = await post(`${round}/review/open-round-review`, speaker, { expectedVersion: labelVersion });
+      assert.equal(opened.stage, 'LISTENER_CLARIFICATION');
+      labelVersion = opened.version;
+      const saved = await post(`${round}/review/round-clarification`, listener, { expectedVersion: labelVersion, note: clarification });
+      assert.equal(saved.stage, 'LISTENER_CLARIFICATION');
+      assert.equal(saved.version, labelVersion);
     }
+    const step = await post(`${round}/review/round-labels`, speaker, { expectedVersion: labelVersion,
+      retellTags: ['遗漏重要信息'], expressionTags: [] });
+    assert.equal(step.stage, 'ADVICE');
     const coached = await poll(() => get(`${round}/comparison`, speaker), result => result.advice?.status === 'ready', 'Ark coaching');
     assert.deepEqual(Object.keys(coached.advice.suggestions), ['speaker']);
     assert.equal(coached.advice.suggestions.speaker.provider, 'ark');
@@ -142,7 +146,9 @@ async function run(mode) {
     assert.equal(archived.stage, 'ARCHIVED');
     if (mode === 'sync') assert.equal(archived.you.role, 'listener');
     if (mode === 'teen') assert.equal(archived.teen.role, 'speaker');
-    assert.equal((await get(`${round}/comparison`, listener)).excluded, 0);
+    const report = await get(`${round}/comparison`, listener);
+    assert.equal(report.excluded, 0);
+    assert.equal(report.wholeRoundFeedback.note, sameDevice ? '' : clarification);
     console.log(`${mode}: candidate extraction, file ASR, ${comparison.provider} comparison, role-scoped Ark coaching, and archive passed.`);
   } finally {
     if (room) await post(`${room}/leave`, speaker).catch(() => undefined);
