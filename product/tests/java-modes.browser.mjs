@@ -87,7 +87,10 @@ async function sameDevice(page) {
   await heading(page, '本轮建议').waitFor();
   await click(page, '归档本轮并查看报告');
   await heading(page, '本轮报告').waitFor();
-  await page.getByText('人工标注的准确复述要点：先看望家人，再决定是否聚餐', { exact: true }).waitFor();
+  await heading(page, '表达者审核结果').waitFor();
+  assert.equal(await page.locator('.point-review-result strong').textContent(), '1 / 1');
+  await page.getByText('所有要点均已勾选。').waitFor();
+  assert.equal(await page.locator('.comparison-grid').count(), 0);
   await page.getByText(/第 8 步 \/ 8/).waitFor();
   await page.getByRole('link', { name: '导出本轮报告（TXT）' }).waitFor();
   const speakerAudio = page.locator('[data-recording-label="表达者录音"]');
@@ -160,7 +163,9 @@ async function asyncRoom(host, guest, early) {
     await heading(guest, '给复述者的建议').waitFor();
     await click(host, '归档本轮并查看报告');
     await heading(guest, '本轮报告').waitFor();
-    await guest.getByText('人工标注的准确复述要点：先看望家人，再决定是否聚餐', { exact: true }).waitFor();
+    await heading(guest, '表达者审核结果').waitFor();
+    assert.equal(await guest.locator('.point-review-result strong').textContent(), '1 / 1');
+    assert.equal(await heading(guest, '全文逐句对照').count(), 0);
     const hostUpload = host.locator('[data-recording-label="表达者录音"]').getByRole('button', { name: '上传素材库', exact: true });
     const guestUpload = guest.locator('[data-recording-label="复述者录音"]').getByRole('button', { name: '上传素材库', exact: true });
     await hostUpload.waitFor();

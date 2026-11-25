@@ -23,6 +23,11 @@ try {
   const issued = new Set();
   const item = { id: 'source-1', original: '如果外婆身体允许，再一起吃午饭。',
     retell: '然后一起吃午饭。', tag: '遗漏重要信息', question: '什么情况下才一起吃饭？', complete: false, accurate: false };
+  const unchecked = { id: 'source-0', original: '周六上午去看外婆。', retell: '先去看外婆',
+    tag: '要点吻合', question: '', complete: true, accurate: true };
+  const missing = { id: 'source-2', original: '如果她累了，就早点回去。', retell: '',
+    tag: '遗漏重要信息', question: '', complete: false, accurate: false };
+  const transcript = `周六上午先去看外婆。${item.retell}`;
 
   // This intercept verifies the browser contract. Java integration tests separately exercise FFmpeg, storage and ASR.
   await page.route('**/api/practice/analysis/**', async route => {
@@ -55,8 +60,8 @@ try {
     }
     return route.fulfill({ json: audioRequests === 1
       ? { status: 'failed', source: 'asr', failure: 'NO_SPEECH' }
-      : { status: 'ready', source: 'asr', transcript: item.retell, provider: 'ark',
-          comparison: { total: 1, complete: 0, accurate: 0, issues: [item], rows: [item] } } });
+      : { status: 'ready', source: 'asr', transcript, provider: 'ark',
+          comparison: { total: 3, complete: 1, accurate: 1, issues: [item, missing], rows: [unchecked, item, missing] } } });
   });
 
   await page.goto(origin);
@@ -99,7 +104,7 @@ try {
   assert.equal(await page.getByText(/示例复述/).count(), 0);
   await button('确认').click();
   await heading('整轮标注').waitFor();
-  await page.getByText(item.retell, { exact: true }).waitFor();
+  await page.getByText(transcript, { exact: true }).waitFor();
   assert.equal(await page.locator('.round-recordings audio').count(), 2);
   assert.equal(await page.getByLabel('结论', { exact: true }).count(), 0);
   await page.getByRole('group', { name: '准确复述的要点（可多选）' }).getByLabel(item.original).check();
@@ -117,7 +122,13 @@ try {
   await button('归档本轮').click();
   await heading('本轮报告').waitFor();
   assert.equal(archived, true);
-  await page.getByText(`人工标注的准确复述要点：${item.original}`, { exact: true }).waitFor();
+  await heading('表达者审核结果').waitFor();
+  assert.equal(await page.locator('.point-review-result strong').textContent(), '1 / 3');
+  assert.equal(await page.locator('.comparison-grid').count(), 0);
+  const details = page.locator('.point-review-details');
+  assert.deepEqual(await details.locator('h4').allTextContents(), [`1. ${unchecked.original}`, `2. ${missing.original}`]);
+  await details.getByText('复述转写原句：周六上午先去看外婆。', { exact: true }).waitFor();
+  await details.getByText('复述转写原句：未找到对应句子', { exact: true }).waitFor();
   assert.equal(await page.locator('.report-media audio[controls]').count(), 2);
   await button('结束并关闭训练室').click();
   await heading('选择练法').waitFor();

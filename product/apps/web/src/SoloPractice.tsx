@@ -4,6 +4,8 @@ import { Recorder } from './Recorder.tsx';
 import { AudioPlayer } from './AudioPlayer.tsx';
 import { MaterialConsentButton } from './MaterialConsentButton.tsx';
 import { AccuratePointFields, RoundLabelFields, emptyLabels, feedbackSummary } from './RoundFeedback.tsx';
+import { PointReviewReport } from './PointReviewReport.tsx';
+import { summarizePointReview } from './round-report.ts';
 import { roundTopics } from './flow.ts';
 import { comparePractice, type PracticeComparisonItem } from './practice-comparison.ts';
 import materials from './practice-materials.json' with { type: 'json' };
@@ -482,6 +484,8 @@ export const SoloPractice = defineComponent({
       const preview = localPreview.value;
       if (!comparison && !preview) return null;
       const recording = retellRecording;
+      const points = comparison?.rows.map(row => ({ id: row.id, original: row.original, listenerQuote: row.retell })) ?? [];
+      const review = summarizePointReview(points, comparison ? accuratePointIds.value : null);
       return <section class="card">
         <h2>{material.value.title}</h2>
         {topic.value === '自定义填写' && <p>自定义主题：{customTopic.value.trim()}</p>}
@@ -494,12 +498,8 @@ export const SoloPractice = defineComponent({
               action: () => <MaterialConsentButton label="复述者录音" endpoint={`/api/practice/reports/${analysis.value?.id}/material-consent`} recording={recording} />,
             } : {})}
         </div>
-        {comparison && comparisonMetrics(comparison)}
-        {comparison?.issues.map((item, index) => <details class="solo-issue" key={item.id}>
-          <summary>{index + 1}. {item.tag || '差异'}</summary>
-          {pairedText(item, retellLabel)}
-        </details>)}
-        {feedbackSummary({ ...labels.value, accuratePointIds: accuratePointIds.value, note: note.value.trim() }, comparison?.rows ?? [])}
+        {feedbackSummary({ ...labels.value, note: note.value.trim() })}
+        <PointReviewReport review={review} transcript={transcript.value} />
         {!preview && <p><strong>{accepted.value ? '已接纳改写建议' : '本轮跳过改写建议'}</strong></p>}
         {accepted.value && <p>{coaching.value?.suggestions.listener?.text}</p>}
         <button type="button" class="primary" onClick={() => go(1)}>再练一轮</button>

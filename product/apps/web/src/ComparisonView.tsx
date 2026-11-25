@@ -3,7 +3,9 @@ import { boundedFetch as fetch, type PracticeAdvice } from './client.ts';
 import { AudioPlayer } from './AudioPlayer.tsx';
 import { MaterialConsentButton } from './MaterialConsentButton.tsx';
 import { nextPractice } from './flow.ts';
-import { AccuratePointFields, RoundLabelFields, accuratePointSummary, emptyLabels, feedbackSummary, type RoundFeedback, type RoundLabels } from './RoundFeedback.tsx';
+import { AccuratePointFields, RoundLabelFields, emptyLabels, feedbackSummary, type RoundFeedback, type RoundLabels } from './RoundFeedback.tsx';
+import { PointReviewReport, missingReview, reviewTitle, unselectedTitle } from './PointReviewReport.tsx';
+import { correspondingRetell, summarizePointReview } from './round-report.ts';
 
 type Resolution = 'misunderstanding' | 'expression' | 'ai_error';
 type Observation = { tag: string; note: string | null };
@@ -145,12 +147,9 @@ export const ComparisonView = defineComponent((props: ComparisonProps) => {
       [sentences(result.transcripts.speaker), sentences(result.transcripts.listener)];
     const allowsDisagreement = result.excluded !== undefined;
     const allConfirmed = problems.every(item => item.speakerConfirmed && (allowsDisagreement || item.listenerConfirmed));
-    const isReport = stage === 'ARCHIVED';
-    const countedProblems = isReport && allowsDisagreement && !result.wholeRoundFeedback ? problems.filter(item => item.listenerConfirmed) : problems;
     const isComparison = stage === 'SPEAKER_LABELING' && !labeling;
     const editable = labeling && stage === 'SPEAKER_LABELING' || stage === 'MUTUAL_CONFIRM';
     const report = result.report;
-    const practice = result.total > 0 ? nextPractice(result.complete, result.total) : '本轮暂无可计入结果的要点。';
     const seats = report ? (anonymous ? ['座位 A', '座位 B'] : [report.speaker, report.listener]) : null;
     const speakerIssue = problems.find(item => item.resolution === 'expression') ?? problems[0];
     const listenerIssue = problems.find(item => item.resolution === 'misunderstanding') ?? problems[0];
@@ -214,41 +213,61 @@ export const ComparisonView = defineComponent((props: ComparisonProps) => {
       {role !== 'speaker' && <p role="status">等待表达者归档本轮。</p>}
       {role !== 'observer' && <button class="secondary" disabled={busy || ownAdviceAccepted || advicePending} onClick={() => void send('adopt', {})}>{ownAdviceAccepted ? '已采纳' : '采纳这条建议'}</button>}
     </section>;
+    if (stage === 'ARCHIVED') {
+      const feedback = result.wholeRoundFeedback;
+      const review = summarizePointReview(result.issues, feedback?.accuratePointIds);
+      const transcript = result.transcripts?.listener;
+      const exportLines = ['回声训练室 · 本轮报告', ...(seats ?? []), reviewTitle,
+        review ? `准确度：${review.accurate} / ${review.total}` : missingReview];
+      if (!anonymous && feedback) {
+        exportLines.push(`给复述者贴的标签：${feedback.retellTags.join('、') || '无标注'}`,
+          `表达者自我评价：${feedback.expressionTags.join('、') || '无标注'}`);
+        if (feedback.note) exportLines.push(`澄清：${feedback.note}`);
+      }
+      if (!anonymous && review?.unselected.length) {
+        exportLines.push(unselectedTitle, ...review.unselected.map((item, index) =>
+          `${index + 1}. ${item.original}\n复述转写原句：${correspondingRetell(item.listenerQuote, transcript)}`));
+      }
+      return <section class="comparison-view"><p>本轮报告已归档。</p>
+        {error && <p role="alert" class="error-text">{error}</p>}
+        {report && seats && <>
+          <label class="toggle-row"><input type="checkbox" checked={anonymous} onChange={event => { isAnonymous.value = (event.currentTarget as HTMLInputElement).checked; }} /> 匿名显示座位代号</label>
+          <p>{seats[0]} / {seats[1]} · 提示级别 {report.hintLevel}</p>
+          {!anonymous && report.focus && <p>预标重点 · {report.focus}</p>}
+          {ownAdviceAccepted && <p>你已采纳本轮练习建议。</p>}
+          {ownAdvice && <blockquote>{ownAdvice.text}</blockquote>}
+          {advicePending && <p role="status">正在生成本轮建议…</p>}
+          {review && review.total > 0 && <p>{nextPractice(review.accurate, review.total)}</p>}
+          {!anonymous && <div class="report-media">
+            {report.speakerAudioId && reportAudio(report.speakerAudioId, 'speaker', speakerAudio)}
+            {report.listenerAudioId && reportAudio(report.listenerAudioId, 'listener', listenerAudio)}
+          </div>}
+          {!anonymous && result.transcripts && <details><summary>查看双方完整转写</summary>
+            <h3>表达录音转写</h3><p>{result.transcripts.speaker}</p>
+            <h3>复述录音转写</h3><p>{result.transcripts.listener}</p>
+          </details>}
+        </>}
+        {!anonymous && feedback && feedbackSummary(feedback)}
+        {(!javaBackend || role !== 'observer') && <PointReviewReport review={review} anonymous={anonymous} transcript={transcript} />}
+        <a class="report-download" download="回声训练室-轮次报告.txt"
+          href={`data:text/plain;charset=utf-8,${encodeURIComponent(exportLines.join('\n'))}`}>导出本轮报告（TXT）</a>
+      </section>;
+    }
     const hasPointComparison = result.provider !== 'no_points';
-    return <section class="comparison-view"><p>{isReport ? '本轮报告已归档。' : !hasPointComparison ? '回顾本轮表达和复述。' : javaBackend ? '先查看 AI 对照结果。' : compactReview && stage === 'MUTUAL_CONFIRM' ? '请确认本轮标注。' : '双方逐条确认最终结论。'}</p>
+    return <section class="comparison-view"><p>{!hasPointComparison ? '回顾本轮表达和复述。' : javaBackend ? '先查看 AI 对照结果。' : compactReview && stage === 'MUTUAL_CONFIRM' ? '请确认本轮标注。' : '双方逐条确认最终结论。'}</p>
       {result.provider === 'mock' && <p class="notice">演示对照使用预置转写和文字匹配。</p>}
       {result.provider === 'rules' && <p class="notice">对照结果基于转写和字面匹配。</p>}
       {result.provider === 'rules_fallback' && <p class="notice">语义对照暂不可用，以下是字面匹配结果，请双方核对。</p>}
       {result.provider === 'ark_partial' && <p class="notice">部分要点使用字面匹配，请双方核对。</p>}
       {result.provider === 'no_points' && <p class="notice">本轮没有确认要点，保留录音和转写供回顾。</p>}
-      {(!result.provider || result.provider === 'ark') && !isReport && <p>AI 提供辅助提示。</p>}
+      {(!result.provider || result.provider === 'ark') && <p>AI 提供辅助提示。</p>}
       {error && <p role="alert" class="error-text">{error}</p>}
-      {report && seats && <>
-        <label class="toggle-row"><input type="checkbox" checked={anonymous} onChange={event => { isAnonymous.value = (event.currentTarget as HTMLInputElement).checked; }} /> 匿名显示座位代号</label>
-        <p>{seats[0]} / {seats[1]} · 提示级别 {report.hintLevel}</p>
-        {!anonymous && report.focus && <p>预标重点 · {report.focus}</p>}
-        {ownAdviceAccepted && <p>你已采纳本轮练习建议。</p>}
-        {ownAdvice && <blockquote>{ownAdvice.text}</blockquote>}
-        {advicePending && <p role="status">正在生成本轮建议…</p>}
-        <p>{practice}</p>
-        {!anonymous && <div class="report-media">
-          {report.speakerAudioId && reportAudio(report.speakerAudioId, 'speaker', speakerAudio)}
-          {report.listenerAudioId && reportAudio(report.listenerAudioId, 'listener', listenerAudio)}
-        </div>}
-        {!anonymous && result.transcripts && <details><summary>查看双方完整转写</summary>
-          <h3>表达录音转写</h3><p>{result.transcripts.speaker}</p>
-          <h3>复述录音转写</h3><p>{result.transcripts.listener}</p>
-        </details>}
-        {!anonymous && result.wholeRoundFeedback && feedbackSummary(result.wholeRoundFeedback, result.issues)}
-      </>}
-      {isReport && hasPointComparison && result.wholeRoundFeedback && <h2>AI 对照结果</h2>}
-      {hasPointComparison && (isComparison || isReport) && <div class="comparison-grid">
+      {hasPointComparison && isComparison && <div class="comparison-grid">
         <div><span>完整度</span><strong>{result.complete} / {result.total}</strong></div>
         <div><span>准确度</span><strong>{result.accurate} / {result.total}</strong></div>
-        <div><span>偏差类型</span><strong>{new Set(countedProblems.map(item => item.tag).filter(Boolean)).size} 类</strong><p>{[...new Set(countedProblems.flatMap(item => item.tag ? [item.tag] : []))].join('、') || '暂无标签'}</p></div>
-        <div><span>可澄清点</span><strong>{countedProblems.filter(item => item.clarification).length} 处</strong></div>
+        <div><span>偏差类型</span><strong>{new Set(problems.map(item => item.tag).filter(Boolean)).size} 类</strong><p>{[...new Set(problems.flatMap(item => item.tag ? [item.tag] : []))].join('、') || '暂无标签'}</p></div>
+        <div><span>可澄清点</span><strong>{problems.filter(item => item.clarification).length} 处</strong></div>
       </div>}
-      {isReport && Boolean(result.excluded) && <p class="notice">{result.excluded} 条未达成一致，不计入本轮结果。</p>}
       <h3>{problems.length ? '有问题的要点 · 逐条对照' : paired ? '全文逐句对照' : '全部信息点对照'}</h3>
       {!anonymous && !problems.length && paired && <ol>{Array.from({ length: Math.max(paired[0]!.length, paired[1]!.length) }, (_, index) => <li key={index}>
         <p>表达者：{paired[0]![index] ?? '—'}</p><p>复述者：{paired[1]![index] ?? '—'}</p>
@@ -279,7 +298,6 @@ export const ComparisonView = defineComponent((props: ComparisonProps) => {
               () => { observations[item.id] = { ...draft, note: '' }; });
           }}>提交观察建议</button>
         </div>}
-        {isReport && item.resolution && <p>{allowsDisagreement && !item.listenerConfirmed ? '未达成一致 · 表达者判断：' : '已确认结论：'}{resolutions.find(([value]) => value === item.resolution)?.[1]}</p>}
         {stage === 'MUTUAL_CONFIRM' && !compactReview && item.resolution && <p>待双方确认的结论：{resolutions.find(([value]) => value === item.resolution)?.[1]}</p>}
         {(!item.complete || !item.accurate) && editable && <>
           {role === 'speaker' && <div class="review-fields"><label>标签<select aria-label={`${item.category}标签`} value={choices[item.id]?.tag ?? item.tag ?? tags[0]!} onChange={event => {
@@ -314,17 +332,6 @@ export const ComparisonView = defineComponent((props: ComparisonProps) => {
       {stage === 'MUTUAL_CONFIRM' && compactReview && <button class="primary" disabled={busy} onClick={() => void completeSoloReview()}>确认</button>}
       {stage === 'MUTUAL_CONFIRM' && solo && !compactReview && <button class="secondary" disabled={busy} onClick={() => void send('switch-seat', { seat: role === 'speaker' ? 'listener' : 'speaker' })}>切换到{role === 'speaker' ? '复述者' : '表达者'}座位</button>}
       {stage === 'MUTUAL_CONFIRM' && !compactReview && role === 'speaker' && <button class="primary" disabled={busy || !allConfirmed} onClick={() => void send('submit', {})}>表达者提交，查看改写建议</button>}
-      {isReport && <a class="report-download" download="回声训练室-轮次报告.txt" href={`data:text/plain;charset=utf-8,${encodeURIComponent(
-        ['回声训练室 · 本轮报告', ...(seats ?? []), `完整度 ${result.complete}/${result.total}`, `准确度 ${result.accurate}/${result.total}`,
-          ...(!anonymous && result.wholeRoundFeedback ? [
-            ...(result.wholeRoundFeedback.accuratePointIds == null ? [] :
-              [`人工标注的准确复述要点：${accuratePointSummary(result.wholeRoundFeedback, result.issues)}`]),
-            `给复述者贴的标签：${result.wholeRoundFeedback.retellTags.join('、') || '无标注'}`,
-            `表达者自我评价：${result.wholeRoundFeedback.expressionTags.join('、') || '无标注'}`,
-            ...(result.wholeRoundFeedback.note ? [`澄清：${result.wholeRoundFeedback.note}`] : []),
-          ] : []),
-          ...(result.excluded ? [`${result.excluded} 条未达成一致，不计入本轮结果。`] : []),
-          ...countedProblems.map(item => anonymous ? item.tag ?? '差异' : `${item.tag ?? '差异'}：${item.original}；复述：${item.listenerQuote || '未找到对应句子'}`)].join('\n'))}`}>导出本轮报告（TXT）</a>}
       {stage === 'MUTUAL_CONFIRM' && !compactReview && <p class="notice">{allowsDisagreement ? '表达者逐条确认后可以提交。复述者未确认的条目不计入本轮结果。' : solo ? '请切换座位分别确认。' : '每条都要由表达者和复述者各自确认。'}修改标签或结论会清除该条旧确认。</p>}
     </section>;
   };
