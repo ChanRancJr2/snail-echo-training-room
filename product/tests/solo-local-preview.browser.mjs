@@ -51,6 +51,7 @@ try {
   await button('跳过分析，继续体验').click();
   await finish();
   assert.equal(await page.locator('.comparison-grid').count(), 0);
+  await page.getByText('本轮未保存准确要点的人工审核结果。').waitFor();
   await button('再练一轮').click();
   await record();
   await page.getByLabel('本轮复述的手动转写').fill('这周六上午，我们先去看外婆。');
@@ -58,7 +59,8 @@ try {
   await page.getByText('本地预览 · 手动转写与关键词对照').waitFor();
   await button('确认').click();
   await finish();
-  await page.locator('.comparison-grid').waitFor();
+  await page.locator('.point-review-result strong').waitFor();
+  assert.equal(await page.locator('.comparison-grid').count(), 0);
   assert.deepEqual(mutations, ['audio', 'audio']);
   console.log('Local solo preview passed: real capture, unscored review, manual comparison and no report writes.');
 } finally {

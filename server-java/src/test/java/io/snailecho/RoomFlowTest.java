@@ -193,8 +193,10 @@ class RoomFlowTest {
             assertThat(choices).isNotEmpty();
             assertThat(post(path + "/advice", Map.of("choices", List.of()), cookie).statusCode()).isEqualTo(400);
             assertThat(post(path + "/advice", Map.of("choices", choices), session()).statusCode()).isEqualTo(404);
-            var feedback = Map.of("retellTags", List.of("遗漏重要信息", "理解不到位"),
-                    "expressionTags", List.of("我表达不清"), "note", "我想再核对午饭时间");
+            var pointId = answer.at("/comparison/rows/0/id").asText();
+            var feedback = Map.of("retellTags", List.of("遗漏重要信息", "理解不到位", "语意被误解"),
+                    "expressionTags", List.of("我记不清", "我有点紧张"), "note", "我想再核对午饭时间",
+                    "accuratePointIds", List.of(pointId));
             assertThat(post(path + "/round-feedback", feedback, session()).statusCode()).isEqualTo(404);
             assertThat(post(path + "/round-feedback", Map.of("retellTags", List.of("我表达不清"),
                     "expressionTags", List.of()), cookie).statusCode()).isEqualTo(400);
@@ -218,6 +220,10 @@ class RoomFlowTest {
             var archived = body(get("/api/practice/reports", cookie)).get(0);
             assertThat(archived.path("accurate").asInt()).isEqualTo(1);
             assertThat(archived.path("transcriptSource").asText()).isEqualTo("asr");
+            byte[] stored = database.queryForObject("SELECT whole_round_feedback FROM single_practice_reports WHERE id=?", byte[].class, id);
+            var storedFeedback = JSON.readTree(textVault.open("solo-feedback:" + id, stored));
+            assertThat(storedFeedback.at("/accuratePointIds/0").asText()).isEqualTo(pointId);
+            assertThat(storedFeedback.path("note").asText()).isEmpty();
             voice.cleanup();
             var discarded = HTTP.send(HttpRequest.newBuilder(submittedUrl.get()).GET().build(), HttpResponse.BodyHandlers.discarding());
             assertThat(discarded.statusCode()).isEqualTo(404);

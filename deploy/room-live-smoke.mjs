@@ -5,14 +5,14 @@ import { setTimeout as delay } from 'node:timers/promises';
 
 const [address, speakerPath, listenerPath, ...requested] = process.argv.slice(2);
 assert.ok(address && speakerPath && listenerPath,
-  'Usage: node deploy/room-live-smoke.mjs STAGING_ORIGIN SPEAKER.mp3 LISTENER.mp3 [sync solo teen async]');
+  'Usage: node deploy/room-live-smoke.mjs STAGING_ORIGIN SPEAKER.mp3 LISTENER.mp3 [sync solo async]');
 const url = new URL(address);
 const loopback = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
 assert.ok(url.protocol === 'https:' || (url.protocol === 'http:' && loopback));
 assert.equal(url.href, `${url.origin}/`);
 const origin = url.origin;
 const [source, responseAudio] = await Promise.all([readFile(speakerPath), readFile(listenerPath)]);
-const allModes = ['sync', 'solo', 'teen', 'async'];
+const allModes = ['sync', 'solo', 'async'];
 const modes = requested.length ? requested : allModes;
 assert.ok(modes.every(mode => allModes.includes(mode)));
 
@@ -41,7 +41,7 @@ async function poll(read, ready, label) {
 }
 
 async function run(mode) {
-  const sameDevice = mode === 'solo' || mode === 'teen';
+  const sameDevice = mode === 'solo';
   const cookies = [];
   let room;
   async function session(label) {
@@ -56,7 +56,6 @@ async function run(mode) {
     const observer = mode === 'sync' ? await session('观察') : null;
     const { state, inviteToken } = await post('/api/rooms', speaker, {
       mode, createKey: randomUUID(), durationSeconds: 60, retellStyle: 'keywords',
-      ...(mode === 'teen' ? { teen: { nickname: '练习样本', role: 'listener' } } : {}),
     }, 201);
     room = `/api/rooms/${state.id}`;
     if (!sameDevice) assert.equal((await post('/api/rooms/join', listener, { token: inviteToken })).you.role, 'listener');
@@ -94,8 +93,10 @@ async function run(mode) {
     const missing = transcription.text.split(/[。？！.!?\n]+/).filter(Boolean).find(sentence => sentence.includes('早点'))?.trim();
     assert.ok(missing);
     const speakerState = await get(room, speaker);
+    const covered = transcription.candidates.find(point => point.text.includes('外婆') && point.text !== missing);
+    assert.ok(covered, 'Expected a candidate about the visit');
     await post(`${round}/points/confirm`, speaker, { expectedVersion: speakerState.roundVersion,
-      points: [{ category: '重点', text: missing }] });
+      points: [{ category: '重点', text: missing }, { category: '重点', text: covered.text }] });
     let listenerState = await get(room, listener);
     if (mode === 'async') {
       assert.equal(listenerState.stage, 'ASYNC_PENDING');
@@ -127,8 +128,12 @@ async function run(mode) {
       assert.equal(saved.stage, 'LISTENER_CLARIFICATION');
       assert.equal(saved.version, labelVersion);
     }
-    const step = await post(`${round}/review/round-labels`, speaker, { expectedVersion: labelVersion,
-      retellTags: ['遗漏重要信息'], expressionTags: [] });
+    const selected = comparison.issues.find(item => item.original === covered.text)?.id;
+    assert.ok(selected, 'The confirmed point must appear in the review');
+    const labels = { expectedVersion: labelVersion, retellTags: ['遗漏重要信息', '语意被误解'],
+      expressionTags: ['我记不清', '我有点紧张'] };
+    await post(`${round}/review/round-labels`, speaker, { ...labels, accuratePointIds: [randomUUID()] }, 400);
+    const step = await post(`${round}/review/round-labels`, speaker, { ...labels, accuratePointIds: [selected] });
     assert.equal(step.stage, 'ADVICE');
     const coached = await poll(() => get(`${round}/comparison`, speaker), result => result.advice?.status === 'ready', 'Ark coaching');
     assert.deepEqual(Object.keys(coached.advice.suggestions), ['speaker']);
@@ -145,10 +150,12 @@ async function run(mode) {
     const archived = await post(`${room}/next-round`, speaker, { roundId: started.roundId, expectedVersion: step.version });
     assert.equal(archived.stage, 'ARCHIVED');
     if (mode === 'sync') assert.equal(archived.you.role, 'listener');
-    if (mode === 'teen') assert.equal(archived.teen.role, 'speaker');
     const report = await get(`${round}/comparison`, listener);
     assert.equal(report.excluded, 0);
     assert.equal(report.wholeRoundFeedback.note, sameDevice ? '' : clarification);
+    assert.deepEqual(report.wholeRoundFeedback.accuratePointIds, [selected]);
+    assert.deepEqual(report.wholeRoundFeedback.retellTags, labels.retellTags);
+    assert.deepEqual(report.wholeRoundFeedback.expressionTags, labels.expressionTags);
     console.log(`${mode}: candidate extraction, file ASR, ${comparison.provider} comparison, role-scoped Ark coaching, and archive passed.`);
   } finally {
     if (room) await post(`${room}/leave`, speaker).catch(() => undefined);

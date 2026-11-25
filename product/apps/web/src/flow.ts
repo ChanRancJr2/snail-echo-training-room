@@ -1,14 +1,11 @@
 import type { Mode, Role, Stage } from '../../../packages/core/src/round.ts';
 
-export const modes: readonly [Mode, string, string][] = [
-  ['sync', '双人同步练', '两台手机，一人表达，一人复述'],
-  ['solo', '双座位自练', '一个人交棒练习倾听与表达'],
-  ['teen', '亲子同机练', '家长和孩子轮流使用同一台手机'],
+export const availableModes: readonly [Mode | 'practice', string, string, string?][] = [
+  ['practice', '单人练习', '选择录音主题，听完后用自己的话复述'],
   ['async', '异步留言练', '先留下表达，搭档稍后再复述'],
+  ['sync', '双人同步练', '一人表达，一人复述', '两台手机'],
+  ['solo', '双座位自练', '在表达者与复述者之间切换', '一台手机'],
 ];
-
-const practiceMode = ['practice', '单人练习', '选择录音主题，听完后用自己的话复述'] as const;
-export const availableModes = [practiceMode, modes[3]!, modes[0]!, modes[1]!, modes[2]!];
 export const roundTopics = ['家庭日常', '校园生活', '疾病与需求', '工作需求', '兴趣爱好', '自定义填写'] as const;
 
 const steps = [

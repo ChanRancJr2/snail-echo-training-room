@@ -288,14 +288,17 @@ class ComparisonService {
                 : review.items().stream().filter(ComparisonService::countsInResults).toList();
     }
 
-    public Updated labelWholeRound(String id, String actor, long version, List<String> retell, List<String> expression) {
+    public Updated labelWholeRound(String id, String actor, long version, List<String> retell, List<String> expression,
+                                  List<String> accuratePointIds) {
         var access = edit(id, actor, version, "speaker", "SPEAKER_LABELING", "MUTUAL_CONFIRM", "LISTENER_CLARIFICATION");
         if (!RoomService.sameDevice(access.room().mode()) && "SPEAKER_LABELING".equals(access.round().stage())) {
             throw new ApiFailure(409, "WRONG_STAGE");
         }
         var review = load(id);
         var prior = review.wholeRoundFeedback();
-        var feedback = WholeRoundFeedback.create(retell, expression, prior == null ? "" : prior.note());
+        var pointIds = review.items().stream().map(Item::id).collect(Collectors.toSet());
+        var feedback = WholeRoundFeedback.create(retell, expression, prior == null ? "" : prior.note())
+                .withAccuratePoints(accuratePointIds, pointIds);
         return persist(access, new Review(review.items(), review.adviceAccepted(), review.provider(),
                 review.listenerAdviceAccepted(), feedback, true), "ADVICE");
     }

@@ -40,8 +40,9 @@ class ComparisonController {
     }
 
     record Version(@NotNull @Min(1) Long expectedVersion) {}
-    record WholeLabels(@NotNull @Min(1) Long expectedVersion, @NotNull @Size(max = 6) List<String> retellTags,
-                       @NotNull @Size(max = 3) List<String> expressionTags) {}
+    record WholeLabels(@NotNull @Min(1) Long expectedVersion, @NotNull @Size(max = 7) List<String> retellTags,
+                       @NotNull @Size(max = 5) List<String> expressionTags,
+                       @Size(max = 12) List<@NotNull UUID> accuratePointIds) {}
     record WholeNote(@NotNull @Min(1) Long expectedVersion, @NotNull @Size(max = 500) String note) {}
     record Issue(@NotNull @Min(1) Long expectedVersion, @NotNull UUID issueId) {}
     record Note(@NotNull @Min(1) Long expectedVersion, @NotNull UUID issueId, @NotBlank @Size(max = 500) String note) {}
@@ -75,7 +76,8 @@ class ComparisonController {
             @RequestHeader(value = "Origin", required = false) String from,
             @CookieValue(value = SESSION, required = false) String cookie) {
         return service.labelWholeRound(roundId.toString(), actor(from, cookie), command.expectedVersion(),
-                command.retellTags(), command.expressionTags());
+                command.retellTags(), command.expressionTags(), command.accuratePointIds() == null ? null :
+                        command.accuratePointIds().stream().map(UUID::toString).toList());
     }
 
     @PostMapping("/review/round-clarification")

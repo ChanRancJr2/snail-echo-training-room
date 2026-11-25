@@ -38,8 +38,9 @@ class SoloPracticeAnalysisController {
 
     record Report(@NotNull Boolean accepted) {}
     record Review(@NotNull @Size(max = 12) List<SoloPracticeAnalysis.ReviewChoice> choices) {}
-    record WholeReview(@NotNull @Size(max = 6) List<String> retellTags,
-                       @NotNull @Size(max = 3) List<String> expressionTags, @Size(max = 500) String note) {}
+    record WholeReview(@NotNull @Size(max = 7) List<String> retellTags,
+                       @NotNull @Size(max = 5) List<String> expressionTags, @Size(max = 500) String note,
+                       @Size(max = 12) List<@NotNull @Size(max = 48) String> accuratePointIds) {}
 
     @PostMapping(value = "/audio", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     ResponseEntity<Void> audio(@PathVariable UUID id, @RequestParam String materialId,
@@ -79,7 +80,7 @@ class SoloPracticeAnalysisController {
         String owner = actor(from, cookie);
         var feedback = WholeRoundFeedback.create(review.retellTags(), review.expressionTags(), review.note());
         return ResponseEntity.ok().cacheControl(CacheControl.noStore())
-                .body(analysis.submitWholeReview(id.toString(), owner, feedback));
+                .body(analysis.submitWholeReview(id.toString(), owner, feedback, review.accuratePointIds()));
     }
 
     @PostMapping("/archive")

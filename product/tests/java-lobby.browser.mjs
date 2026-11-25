@@ -158,6 +158,10 @@ try {
         assert.equal(saved.wholeRoundFeedback.note, '我想再核对聚餐前提');
         await guest.reload();
         assert.equal(await guest.getByLabel('补充澄清（选填）').inputValue(), '我想再核对聚餐前提');
+        const pointChoices = host.getByRole('group', { name: '准确复述的要点（可多选）' }).getByRole('checkbox');
+        assert.equal(await pointChoices.count(), initial.issues.length);
+        const selected = observer ? initial.issues.slice(0, 1) : [];
+        if (selected.length) await pointChoices.first().check();
         await host.getByLabel('遗漏重要信息', { exact: true }).check();
         await host.getByLabel('理解不到位', { exact: true }).check();
         await host.getByLabel('我表达不清', { exact: true }).check();
@@ -176,6 +180,8 @@ try {
         await host.getByRole('button', { name: '提交标注', exact: true }).click();
         await host.getByRole('heading', { name: '给表达者的建议' }).waitFor();
         await guest.getByRole('heading', { name: '给复述者的建议' }).waitFor();
+        const submittedReview = await (await guest.request.get(`${origin}/api/rounds/${snapshot.roundId}/comparison`)).json();
+        assert.deepEqual(submittedReview.wholeRoundFeedback.accuratePointIds, selected.map(point => point.id));
         assert.equal(await host.getByRole('heading', { name: '等待复述者澄清' }).count(), 0);
         if (observer) {
           await observer.getByRole('heading', { name: '给表达者的建议' }).waitFor();
@@ -196,6 +202,11 @@ try {
         await host.getByRole('button', { name: '归档本轮并查看报告' }).click();
         await guest.getByText('本轮报告已归档。').waitFor();
         await guest.getByText('澄清：我想再核对聚餐前提').waitFor();
+        await guest.getByRole('heading', { name: '表达者审核结果' }).waitFor();
+        assert.equal(await guest.locator('.point-review-result strong').textContent(), `${selected.length} / ${initial.issues.length}`);
+        assert.equal(await guest.locator('.comparison-grid').count(), 0);
+        assert.equal(await guest.getByRole('heading', { name: '全文逐句对照' }).count(), 0);
+        assert.equal(await guest.locator('.point-review-details article').count(), initial.issues.length - selected.length);
         const ownRecording = (page, label) => page.locator(`.report-media [data-recording-label="${label}"]`);
         const hostConsent = ownRecording(host, '表达者录音').getByRole('button', { name: '上传素材库', exact: true });
         const guestConsent = ownRecording(guest, '复述者录音').getByRole('button', { name: '上传素材库', exact: true });
@@ -225,6 +236,7 @@ try {
         await guest.getByText('座位 A / 座位 B', { exact: false }).waitFor();
         const exportReport = await guest.getByRole('link', { name: '导出本轮报告（TXT）' }).getAttribute('href');
         assert.match(decodeURIComponent(exportReport), /座位 A\n座位 B/);
+        assert.ok(decodeURIComponent(exportReport).includes(`准确度：${selected.length} / ${initial.issues.length}`));
         assert.doesNotMatch(decodeURIComponent(exportReport), /先看望家人/);
         await host.getByRole('button', { name: '返回训练室，成为复述者' }).click();
         await guest.getByRole('button', { name: '返回训练室，成为表达者' }).click();

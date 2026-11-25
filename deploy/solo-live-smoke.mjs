@@ -71,8 +71,12 @@ try {
     assert.equal(analyzed.provider, 'ark', 'Semantic comparison must complete without a rules fallback');
     const issues = analyzed.comparison.issues;
     assert.ok(issues.length > 0, 'Use a fixture with an intentional omission to test model-generated advice');
+    const point = analyzed.comparison.rows[0];
+    assert.ok(point?.id);
+    const feedback = { retellTags: ['遗漏重要信息', '语意被误解'], expressionTags: ['我记不清', '我有点紧张'], note: '' };
+    await request(`${path}/round-feedback`, { cookie, status: 400, body: JSON.stringify({ ...feedback, accuratePointIds: [randomUUID()] }) });
     await request(`${path}/round-feedback`, { cookie, body: JSON.stringify({
-      retellTags: ['遗漏重要信息'], expressionTags: [], note: '',
+      ...feedback, accuratePointIds: [point.id],
     }) });
     const advice = await untilSettled(`${path}/advice`, cookie, 125_000);
     assert.equal(advice.status, 'ready');
