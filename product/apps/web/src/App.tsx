@@ -174,10 +174,10 @@ const TrainingApp = defineComponent(() => {
             <p class="lead">先复述，不评价。对照说出去的和听到的差在哪里。</p></>}
           <p class="notice">已登录 · {session.value.nickname}</p>
           {showHome && <><h2>选择练法</h2>
-            <div class="modes">{availableModes.map(([key, title, description]) => <button type="button" key={key} onClick={() => {
+            <div class="modes">{availableModes.map(([key, title, description, devices]) => <button type="button" key={key} onClick={() => {
               selected.value = key;
               window.scrollTo(0, 0);
-            }}><strong>{title}</strong><small>{description}</small></button>)}</div>
+            }}><span class="mode-heading"><strong>{title}</strong>{devices && <span class="mode-devices">{devices}</span>}</span><small>{description}</small></button>)}</div>
             {!javaDemo && <button class="secondary" onClick={openHistory}>复盘记录</button>}
             {javaDemo && <button type="button" class="text-button" disabled={logoutPending.value} onClick={() => void logout()}>
               {logoutPending.value ? '正在退出…' : '退出登录'}

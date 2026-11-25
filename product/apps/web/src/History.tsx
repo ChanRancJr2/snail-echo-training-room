@@ -1,6 +1,6 @@
 import { computed, defineComponent, ref } from 'vue';
 import { ComparisonView } from './ComparisonView.tsx';
-import { modes } from './flow.ts';
+import { availableModes } from './flow.ts';
 import { boundedFetch as fetch } from './client.ts';
 
 export interface RecordSummary {
@@ -34,6 +34,10 @@ export const History = defineComponent((props: HistoryProps) => {
     return props.records.filter(record => record.mode === mode.value && [record.topic, ...record.tags].some(value => value.includes(search)));
   });
   const trendRecords = computed(() => filteredRecords.value.slice(0, 8).reverse());
+  const historyModes = computed(() => {
+    const active = availableModes.filter(([key]) => key !== 'practice');
+    return props.records.some(record => record.mode === 'teen') ? [...active, ['teen', '亲子同机练'] as const] : active;
+  });
 
   async function deletion(scope: DeleteIntent['scope'], targetId: string | null, execute = false) {
     if (deleting.value) return;
@@ -89,7 +93,7 @@ export const History = defineComponent((props: HistoryProps) => {
       <button class="text-button" onClick={onBack}>← 返回</button><h1 class="flow-title">复盘记录</h1>
       {message && <p role="status">{message}</p>}
       {status ? <p role="status">{status}</p> : <>
-        <div class="option-grid" aria-label="复盘练法">{modes.map(([key, label]) => <button key={key} aria-pressed={mode.value === key} class={mode.value === key ? 'chosen' : ''} onClick={() => { mode.value = key; }}>{label}</button>)}</div>
+        <div class="option-grid" aria-label="复盘练法">{historyModes.value.map(([key, label]) => <button key={key} aria-pressed={mode.value === key} class={mode.value === key ? 'chosen' : ''} onClick={() => { mode.value = key; }}>{label}</button>)}</div>
         <label class="search-field">搜索主题或误解标签<input type="search" maxlength={80} value={query.value} onInput={event => { query.value = (event.currentTarget as HTMLInputElement).value; }} /></label>
         {!!trend.length && <div class="card"><h2>复述完整率</h2><ol class="history-trend" aria-label="最近八轮，从旧到新">
           {trend.map(record => <li key={record.id}><span>{new Date(record.finishedAt).toLocaleDateString()}</span><meter aria-label={`${record.topic}复述完整率`} min={0} max={100} value={ratio(record)} /><strong>{ratio(record)}%</strong>

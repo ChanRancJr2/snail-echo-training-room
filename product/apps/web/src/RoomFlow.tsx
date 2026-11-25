@@ -6,7 +6,7 @@ import { PointEditor } from './PointEditor.tsx';
 import { ComparisonView } from './ComparisonView.tsx';
 import { KeywordHints } from './KeywordHints.tsx';
 import { trackListenerEngagement } from './listener-engagement.ts';
-import { modes, nextPractice, roundStep, roundTopics } from './flow.ts';
+import { availableModes, nextPractice, roundStep, roundTopics } from './flow.ts';
 import { isSameDevice, type Mode, type Stage } from '../../../packages/core/src/round.ts';
 
 type Seat = 'speaker' | 'listener';
@@ -64,7 +64,6 @@ export const RoomFlow = defineComponent((props: RoomFlowProps) => {
     inviteRole: 'listener' as 'listener' | 'observer', inviteMinutes: 60, inviteOnce: true, shareUrl: '',
     error: '', reconnecting: false, busy: false, durationSeconds: 30,
     retellStyle: 'auditory' as 'auditory' | 'keywords', topic: '家庭日常', customTopic: '',
-    teenNickname: '', teenRole: 'listener' as 'speaker' | 'listener', guardianPin: '', guardianConsent: false,
     unlockOpen: false, unlockPin: '', task: null as { roundId: string; focus: string } | null, focus: '',
     labelingRound: null as string | null, handoffRound: null as string | null,
     capturingRound: null as string | null, reportDismissed: null as string | null,
@@ -189,17 +188,13 @@ export const RoomFlow = defineComponent((props: RoomFlowProps) => {
 
   const create = () => void run(async () => {
     const mode = props.mode;
-    const { durationSeconds, retellStyle, topic, customTopic, teenNickname, guardianPin, teenRole, guardianConsent } = state;
-    if (!mode) return;
+    const { durationSeconds, retellStyle, topic, customTopic } = state;
+    if (!mode || mode === 'teen') return;
     createKey ??= newRequestId();
     const result = await call<{ state: Room; inviteToken: string | null }>('/api/rooms', {
       mode, createKey, durationSeconds, retellStyle, topic: topic === '自定义填写' ? customTopic.trim() : topic,
-      ...(mode === 'teen' ? { teen: javaBackend
-        ? { nickname: teenNickname.trim() || '孩子', role: teenRole }
-        : { nickname: teenNickname.trim(), pin: guardianPin, role: teenRole, consent: guardianConsent } } : {}),
     });
     createKey = null;
-    state.guardianPin = '';
     state.invite = result.inviteToken;
     state.inviteMinutes = javaBackend && mode === 'async' ? 0 : 60;
     state.shareUrl = javaBackend && mode === 'async' && result.inviteToken ? invitationUrl(result.inviteToken) : '';
@@ -283,8 +278,8 @@ export const RoomFlow = defineComponent((props: RoomFlowProps) => {
   return () => {
     const { mode } = props;
     const { room, token, invite, inviteRole, inviteMinutes, inviteOnce, shareUrl, error,
-      reconnecting, busy, durationSeconds, retellStyle, topic, customTopic, teenNickname, teenRole,
-      guardianPin, guardianConsent, unlockOpen, unlockPin, task, focus, labelingRound, handoffRound,
+      reconnecting, busy, durationSeconds, retellStyle, topic, customTopic,
+      unlockOpen, unlockPin, task, focus, labelingRound, handoffRound,
       capturingRound, reportDismissed } = state;
     const sameDevice = Boolean(room && isSameDevice(room.mode));
     const compactReview = room?.mode === 'solo' || (javaBackend && room?.mode === 'teen');
@@ -347,19 +342,12 @@ export const RoomFlow = defineComponent((props: RoomFlowProps) => {
         }}>返回首页</button>
       </>
         : <p role="status" class="notice">正在打开训练室…</p>)}
-      {!token && !room && mode && <div class="card"><h1 class="flow-title">{modes.find(([key]) => key === mode)?.[1]}</h1><p>选择本轮主题、发言时长和复述方式。</p>
+      {!token && !room && mode && <div class="card"><h1 class="flow-title">{availableModes.find(([key]) => key === mode)?.[1]}</h1><p>选择本轮主题、发言时长和复述方式。</p>
         <strong>本轮主题</strong><div class="option-grid">{roundTopics.map(value => <button key={value} aria-pressed={topic === value} class={topic === value ? 'chosen' : ''} onClick={() => update('topic', value)}>{value}</button>)}</div>
         {topic === '自定义填写' && <input aria-label="自定义主题" maxlength={80} placeholder="填写本轮主题" value={customTopic} onInput={event => update('customTopic', (event.target as HTMLInputElement | HTMLSelectElement).value)} />}
         <strong>每人发言时长</strong><div class="option-grid">{[[30, '30 秒'], [60, '1 分钟'], [120, '2 分钟'], [300, '5 分钟']].map(([value, label]) => <button key={value} class={durationSeconds === value ? 'chosen' : ''} onClick={() => update('durationSeconds', Number(value))}>{label}</button>)}</div>
         <strong>复述方式</strong><div class="option-grid">{[['auditory', '纯听觉'], ['keywords', '关键词辅助']].map(([value, label]) => <button key={value} class={retellStyle === value ? 'chosen' : ''} onClick={() => update('retellStyle', value as 'auditory' | 'keywords')}>{label}</button>)}</div>
-        {mode === 'teen' && <section><h2>青少年临时身份</h2><label>孩子昵称<input maxlength={12} placeholder={javaBackend ? '选填，默认为孩子' : undefined} value={teenNickname} onInput={event => update('teenNickname', (event.target as HTMLInputElement | HTMLSelectElement).value)} /></label>
-          <p>孩子本轮身份</p><div class="option-grid">{(['speaker','listener'] as const).map(role => <button key={role} class={teenRole === role ? 'chosen' : ''} onClick={() => update('teenRole', role)}>{names[role]}</button>)}</div>
-          {!javaBackend && <>
-            <label>设置 6 位监护人退出码<input type="password" inputmode="numeric" autocomplete="new-password" maxlength={6} value={guardianPin} onInput={event => update('guardianPin', (event.target as HTMLInputElement | HTMLSelectElement).value)} /></label>
-            <label class="toggle-row"><input type="checkbox" checked={guardianConsent} onChange={event => update('guardianConsent', (event.target as HTMLInputElement).checked)} /> 我是监护人，同意本次训练、录音和转写。</label>
-          </>}
-        </section>}
-        <button class="primary" disabled={busy || (!javaBackend && mode === 'teen' && (!guardianConsent || !teenNickname.trim() || !/^\d{6}$/.test(guardianPin))) || (topic === '自定义填写' && !customTopic.trim())} onClick={create}>创建训练室</button></div>}
+        <button class="primary" disabled={busy || (topic === '自定义填写' && !customTopic.trim())} onClick={create}>创建训练室</button></div>}
       {room && waiting && asyncEntry && !ownsRoom && <div class="card"><p role="status">{waitingForExpression}</p></div>}
       {room && waiting && !guardianPanel && !asyncEntry && <div class="card"><h2>准备好，慢慢开始</h2><p>你的座位：{names[room.you.role]} · {room.topic} · {room.durationSeconds} 秒 · {room.retellStyle === 'keywords' ? '关键词辅助' : '纯听觉'}</p>
         {(sameDevice ? ['speaker','listener'] as const : ['speaker', 'listener', 'observer'] as const).map(role => {

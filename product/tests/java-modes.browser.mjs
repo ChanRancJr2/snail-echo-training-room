@@ -31,12 +31,8 @@ async function snapshot(page) {
   return response.json();
 }
 
-async function create(page, mode, teen = false) {
+async function create(page, mode) {
   await page.getByRole('button', { name: new RegExp('^' + mode) }).click();
-  if (teen) {
-    assert.equal(await page.getByLabel(/监护人退出码/).count(), 0);
-    assert.equal(await page.getByLabel('孩子昵称').inputValue(), '');
-  }
   const response = page.waitForResponse(response => response.url().endsWith('/api/rooms') &&
     response.request().method() === 'POST' && response.ok());
   await click(page, '创建训练室');
@@ -65,22 +61,22 @@ async function express(page, beforePoints) {
   await click(page, '确认重点，请搭档复述');
 }
 
-async function sameDevice(page, mode, isTeen) {
-  await create(page, mode, isTeen);
+async function sameDevice(page) {
+  await create(page, '双座位自练');
   await click(page, '准备好了');
   await click(page, '开始本轮');
   await heading(page, '先定这轮任务').waitFor();
   const first = await snapshot(page);
   assert.equal(first.stage, 'TASK');
-  assert.equal(first.mode, isTeen ? 'teen' : 'solo');
-  if (isTeen) assert.equal(first.teen.role, 'listener');
+  assert.equal(first.mode, 'solo');
   await express(page);
   await page.getByRole('button', { name: /^确认交棒/ }).click();
   await click(page, '播放表达者录音');
   await page.getByRole('button', { name: /暂停播放|已听过/ }).waitFor();
   await record(page, true);
   await click(page, '开始整轮标注');
-  await page.getByLabel('语气被误解', { exact: true }).check();
+  await page.getByRole('group', { name: '准确复述的要点（可多选）' }).getByLabel('先看望家人，再决定是否聚餐').check();
+  await page.getByLabel('语意被误解', { exact: true }).check();
   const label = page.waitForResponse(response => response.url().endsWith('/review/round-labels'));
   await click(page, '提交标注，查看建议');
   assert.equal((await label).status(), 200);
@@ -91,6 +87,7 @@ async function sameDevice(page, mode, isTeen) {
   await heading(page, '本轮建议').waitFor();
   await click(page, '归档本轮并查看报告');
   await heading(page, '本轮报告').waitFor();
+  await page.getByText('人工标注的准确复述要点：先看望家人，再决定是否聚餐', { exact: true }).waitFor();
   await page.getByText(/第 8 步 \/ 8/).waitFor();
   await page.getByRole('link', { name: '导出本轮报告（TXT）' }).waitFor();
   const speakerAudio = page.locator('[data-recording-label="表达者录音"]');
@@ -111,7 +108,6 @@ async function sameDevice(page, mode, isTeen) {
   assert.equal(second.stage, 'TASK');
   assert.notEqual(second.roundId, first.roundId);
   assert.equal(second.deadlineAt, null);
-  if (isTeen) assert.equal(second.teen.role, 'speaker');
   await click(page, '结束并关闭训练室');
 }
 
@@ -156,12 +152,15 @@ async function asyncRoom(host, guest, early) {
     await record(guest, true);
     await click(host, '开始整轮标注');
     await heading(guest, '复述者澄清').waitFor();
+    assert.equal(await guest.getByRole('group', { name: '准确复述的要点（可多选）' }).count(), 0);
+    await host.getByRole('group', { name: '准确复述的要点（可多选）' }).getByLabel('先看望家人，再决定是否聚餐').check();
     await button(guest, '播放表达者录音').waitFor();
     await button(guest, '播放复述者录音').waitFor();
     await click(host, '提交标注');
     await heading(guest, '给复述者的建议').waitFor();
     await click(host, '归档本轮并查看报告');
     await heading(guest, '本轮报告').waitFor();
+    await guest.getByText('人工标注的准确复述要点：先看望家人，再决定是否聚餐', { exact: true }).waitFor();
     const hostUpload = host.locator('[data-recording-label="表达者录音"]').getByRole('button', { name: '上传素材库', exact: true });
     const guestUpload = guest.locator('[data-recording-label="复述者录音"]').getByRole('button', { name: '上传素材库', exact: true });
     await hostUpload.waitFor();
@@ -180,13 +179,17 @@ async function asyncRoom(host, guest, early) {
 }
 
 try {
-  const [solo, teen, host, guest] = await Promise.all(['双座位玩家', '亲子同机家庭', '留言表达者', '留言复述者'].map(open));
-  await sameDevice(solo, '双座位自练', false);
-  await sameDevice(teen, '亲子同机练', true);
+  const [solo, host, guest] = await Promise.all(['双座位玩家', '留言表达者', '留言复述者'].map(open));
+  assert.equal(await solo.getByRole('button', { name: /^亲子同机练/ }).count(), 0);
+  const retired = await solo.request.post(`${origin}/api/rooms`, { headers: { Origin: origin }, data: {
+    mode: 'teen', createKey: 'retired-mode-check', durationSeconds: 30, retellStyle: 'auditory',
+  } });
+  assert.equal(retired.status(), 400);
+  await sameDevice(solo);
   await asyncRoom(host, guest, true);
   await asyncRoom(host, guest, false);
   assert.deepEqual(errors, []);
-  console.log('Java browser regression passed: both same-device modes, parent-child swap, and early/late asynchronous invitations.');
+  console.log('Java browser regression passed: same-device practice and early/late asynchronous invitations.');
 } finally {
   await browser.close();
 }

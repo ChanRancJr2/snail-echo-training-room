@@ -42,7 +42,8 @@ try {
     assert.ok(issued.has(id));
     if (parts[5] === 'round-feedback') {
       assert.equal(request.method(), 'POST');
-      assert.deepEqual(request.postDataJSON(), { retellTags: ['遗漏重要信息', '理解不到位'], expressionTags: ['我表达不清'], note: '需要核对午饭条件' });
+      assert.deepEqual(request.postDataJSON(), { retellTags: ['遗漏重要信息', '理解不到位', '语意被误解'],
+        expressionTags: ['我表达不清', '我记不清', '我有点紧张'], accuratePointIds: [item.id], note: '需要核对午饭条件' });
       return route.fulfill({ json: { status: 'ready', suggestions: {
         listener: { text: '复述时说清午饭成立的条件。', evidenceId: item.id, provider: 'ark' },
       } } });
@@ -61,7 +62,8 @@ try {
   await page.goto(origin);
   await loginWithNickname(page, '单人录音验收');
   assert.deepEqual(await page.locator('.modes button strong').allTextContents(),
-    ['单人练习', '异步留言练', '双人同步练', '双座位自练', '亲子同机练']);
+    ['单人练习', '异步留言练', '双人同步练', '双座位自练']);
+  assert.deepEqual(await page.locator('.modes .mode-devices').allTextContents(), ['两台手机', '一台手机']);
   await page.getByRole('button', { name: /^单人练习/ }).click();
   await heading('录音主题').waitFor();
   assert.deepEqual(await page.getByRole('group', { name: '录音主题' }).getByRole('button').allTextContents(),
@@ -100,9 +102,13 @@ try {
   await page.getByText(item.retell, { exact: true }).waitFor();
   assert.equal(await page.locator('.round-recordings audio').count(), 2);
   assert.equal(await page.getByLabel('结论', { exact: true }).count(), 0);
+  await page.getByRole('group', { name: '准确复述的要点（可多选）' }).getByLabel(item.original).check();
   await page.getByLabel('遗漏重要信息', { exact: true }).check();
   await page.getByLabel('理解不到位', { exact: true }).check();
+  await page.getByRole('group', { name: '给复述者贴的标签（表达者评价复述方）' }).getByLabel('语意被误解').check();
   await page.getByLabel('我表达不清', { exact: true }).check();
+  await page.getByLabel('我记不清', { exact: true }).check();
+  await page.getByLabel('我有点紧张', { exact: true }).check();
   await page.getByLabel('补充澄清（选填）').fill('需要核对午饭条件');
   await button('提交，查看改写建议').click();
   await page.getByText('复述时说清午饭成立的条件。', { exact: true }).waitFor();
@@ -111,6 +117,7 @@ try {
   await button('归档本轮').click();
   await heading('本轮报告').waitFor();
   assert.equal(archived, true);
+  await page.getByText(`人工标注的准确复述要点：${item.original}`, { exact: true }).waitFor();
   assert.equal(await page.locator('.report-media audio[controls]').count(), 2);
   await button('结束并关闭训练室').click();
   await heading('选择练法').waitFor();

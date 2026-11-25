@@ -158,6 +158,9 @@ try {
         assert.equal(saved.wholeRoundFeedback.note, '我想再核对聚餐前提');
         await guest.reload();
         assert.equal(await guest.getByLabel('补充澄清（选填）').inputValue(), '我想再核对聚餐前提');
+        const pointChoices = host.getByRole('group', { name: '准确复述的要点（可多选）' }).getByRole('checkbox');
+        assert.equal(await pointChoices.count(), initial.issues.length);
+        if (initial.issues.length > 0) await pointChoices.first().check();
         await host.getByLabel('遗漏重要信息', { exact: true }).check();
         await host.getByLabel('理解不到位', { exact: true }).check();
         await host.getByLabel('我表达不清', { exact: true }).check();
@@ -176,6 +179,8 @@ try {
         await host.getByRole('button', { name: '提交标注', exact: true }).click();
         await host.getByRole('heading', { name: '给表达者的建议' }).waitFor();
         await guest.getByRole('heading', { name: '给复述者的建议' }).waitFor();
+        const submittedReview = await (await guest.request.get(`${origin}/api/rounds/${snapshot.roundId}/comparison`)).json();
+        assert.deepEqual(submittedReview.wholeRoundFeedback.accuratePointIds, initial.issues.slice(0, 1).map(point => point.id));
         assert.equal(await host.getByRole('heading', { name: '等待复述者澄清' }).count(), 0);
         if (observer) {
           await observer.getByRole('heading', { name: '给表达者的建议' }).waitFor();

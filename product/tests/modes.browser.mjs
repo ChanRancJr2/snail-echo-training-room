@@ -39,17 +39,10 @@ async function simulateBrokenMediaRecorder(page) {
 
 const click = (page, name) => page.getByRole('button', { name, exact: true }).click();
 const room = page => page.evaluate(async () => (await fetch(`/api/rooms/${new URLSearchParams(location.search).get('room')}`)).json());
-const status = (page, path) => page.evaluate(async url => (await fetch(url)).status, path);
 
-async function setup(page, mode, childRole) {
+async function setup(page, mode) {
   await page.getByRole('button', { name: new RegExp(mode) }).click();
   await click(page, '关键词辅助');
-  if (childRole) {
-    await page.getByLabel('孩子昵称').fill('小禾');
-    await click(page, childRole);
-    await page.getByLabel('设置 6 位监护人退出码').fill('429613');
-    await page.getByLabel('我是监护人，同意本次训练、录音和转写。').check();
-  }
   const created = page.waitForResponse(result => result.url().endsWith('/api/rooms') && result.request().method() === 'POST');
   await click(page, '创建训练室');
   const response = await created;
@@ -77,27 +70,6 @@ async function express(page) {
   await click(page, '确认重点，请搭档复述');
 }
 
-async function guardianReturn(page) {
-  await page.getByLabel('监护人退出码').fill('000000');
-  await click(page, '监护人已接回手机');
-  await page.getByText('监护人退出码不正确。').waitFor();
-  await page.getByLabel('监护人退出码').fill('429613');
-  await click(page, '监护人已接回手机');
-  await page.getByRole('button', { name: '监护人已接回手机' }).waitFor({ state: 'hidden' });
-}
-
-async function sameDeviceReport(page) {
-  await click(page, '请表达者逐条标注');
-  await click(page, '提交标注，邀请双方确认');
-  await click(page, '确认这一条');
-  await click(page, '切换到复述者座位');
-  await click(page, '确认这一条');
-  await click(page, '切换到表达者座位');
-  await click(page, '表达者提交，查看改写建议');
-  await click(page, '归档本轮并查看报告');
-  await page.getByText('本轮报告已归档。').waitFor();
-}
-
 async function soloReport(page) {
   await click(page, '请逐条标注');
   await page.getByText('第 6 步 / 8').waitFor();
@@ -112,7 +84,7 @@ async function soloReport(page) {
 }
 
 try {
-  const [asyncHost, asyncGuest, solo, teen] = await Promise.all([mobile(), mobile(), mobile(), mobile()]);
+  const [asyncHost, asyncGuest, solo] = await Promise.all([mobile(), mobile(), mobile()]);
   const asyncRoom = await setup(asyncHost, '异步留言练');
   await express(asyncHost);
   await asyncHost.getByText('留言已送达训练室，等待复述者打开。').waitFor();
@@ -158,35 +130,6 @@ try {
   await soloReport(solo);
   await click(solo, '结束并关闭训练室');
 
-  await setup(teen, '亲子同机练', '表达者');
-  await click(teen, '确认交棒给 小禾');
-  await teen.getByRole('button', { name: '交还监护人' }).waitFor();
-  assert.equal(await status(teen, '/api/history'), 403);
-  const childState = await room(teen);
-  assert.equal(childState.teen.locked, true);
-  assert.equal(await teen.evaluate(async id => (await fetch(`/api/rooms/${id}/leave`, { method: 'POST' })).status, childState.id), 403);
-  await teen.goto(origin);
-  await teen.waitForURL(`${origin}/?room=${childState.id}`);
-  const replaceSession = await teen.request.post(`${origin}/api/sessions/anonymous`, {
-    headers: { Origin: origin }, data: { nickname: '尝试切换身份' },
-  });
-  assert.equal(replaceSession.status(), 403);
-  await express(teen);
-  await teen.getByRole('heading', { name: '请把手机交还监护人' }).waitFor();
-  await guardianReturn(teen);
-  assert.equal(await status(teen, '/api/history'), 200);
-  await record(teen, true);
-  await sameDeviceReport(teen);
-  await click(teen, '结束并关闭训练室');
-
-  await setup(teen, '亲子同机练', '复述者');
-  await express(teen);
-  await click(teen, '确认交棒给 小禾');
-  await record(teen, true);
-  await guardianReturn(teen);
-  await sameDeviceReport(teen);
-  await click(teen, '结束并关闭训练室');
-
   assert.deepEqual(errors, []);
-  console.log('Async invite after sending, solo handoff, and both guardian seat assignments passed');
+  console.log('Async invite after sending and solo handoff passed');
 } finally { await browser.close(); }

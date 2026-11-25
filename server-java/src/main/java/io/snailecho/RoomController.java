@@ -40,7 +40,7 @@ class RoomController {
 
     record TeenInput(@Size(max = 12) String nickname,
                      @NotNull @Pattern(regexp = "speaker|listener") String role) {}
-    record CreateRequest(@NotNull @Pattern(regexp = "sync|solo|teen|async") String mode,
+    record CreateRequest(@NotNull @Pattern(regexp = "sync|solo|async") String mode,
                          @NotNull @Size(min = 8, max = 100) String createKey,
                          Integer durationSeconds, @Pattern(regexp = "auditory|keywords") String retellStyle,
                          @Size(max = 80) String topic, @Valid TeenInput teen) {}
@@ -114,11 +114,8 @@ class RoomController {
         String style = request.retellStyle() == null ? "auditory" : request.retellStyle();
         String topic = request.topic() == null ? "家庭日常" : request.topic().strip();
         if (topic.isEmpty()) throw invalid();
-        var teen = request.teen();
-        if ("teen".equals(request.mode()) != (teen != null)) throw invalid();
-        String nickname = teen == null ? null : teen.nickname() == null || teen.nickname().isBlank() ? "孩子" : teen.nickname().strip();
-        var data = rooms.create(actor, request.createKey(), request.mode(), seconds, style, topic,
-                nickname, teen == null ? null : teen.role());
+        if (request.teen() != null) throw invalid();
+        var data = rooms.create(actor, request.createKey(), request.mode(), seconds, style, topic, null, null);
         return ResponseEntity.status(data.created() ? 201 : 200).body(data);
     }
 

@@ -3,7 +3,7 @@ import { boundedFetch as fetch, type PracticeAdvice } from './client.ts';
 import { AudioPlayer } from './AudioPlayer.tsx';
 import { MaterialConsentButton } from './MaterialConsentButton.tsx';
 import { nextPractice } from './flow.ts';
-import { RoundLabelFields, emptyLabels, feedbackSummary, type RoundFeedback, type RoundLabels } from './RoundFeedback.tsx';
+import { AccuratePointFields, RoundLabelFields, accuratePointSummary, emptyLabels, feedbackSummary, type RoundFeedback, type RoundLabels } from './RoundFeedback.tsx';
 
 type Resolution = 'misunderstanding' | 'expression' | 'ai_error';
 type Observation = { tag: string; note: string | null };
@@ -29,6 +29,7 @@ export const ComparisonView = defineComponent((props: ComparisonProps) => {
   const listenerAudio = ref<HTMLAudioElement | null>(null);
   const draftChoices = ref<Record<string, { tag: string; resolution: Resolution }>>({});
   const roundLabels = ref<RoundLabels | null>(null);
+  const accuratePointIds = ref<string[]>([]);
   const clarification = ref<string | null>(null);
   const savedClarification = ref<string | null>(null);
 
@@ -180,7 +181,9 @@ export const ComparisonView = defineComponent((props: ComparisonProps) => {
             </section>;
           })}
         </div>
-        {reviewing && <form onSubmit={event => { event.preventDefault(); void send('round-labels', labels); }}>
+        {reviewing && <form onSubmit={event => { event.preventDefault(); void send('round-labels', { ...labels, accuratePointIds: accuratePointIds.value }); }}>
+          <AccuratePointFields points={result.issues} selected={accuratePointIds.value} disabled={busy}
+            onChange={next => { accuratePointIds.value = next; }} />
           <RoundLabelFields value={labels} disabled={busy} onChange={next => { roundLabels.value = next; }} />
           <button type="submit" class="primary" disabled={busy}>{solo ? '提交标注，查看建议' : '提交标注'}</button>
         </form>}
@@ -236,7 +239,7 @@ export const ComparisonView = defineComponent((props: ComparisonProps) => {
           <h3>表达录音转写</h3><p>{result.transcripts.speaker}</p>
           <h3>复述录音转写</h3><p>{result.transcripts.listener}</p>
         </details>}
-        {!anonymous && result.wholeRoundFeedback && feedbackSummary(result.wholeRoundFeedback)}
+        {!anonymous && result.wholeRoundFeedback && feedbackSummary(result.wholeRoundFeedback, result.issues)}
       </>}
       {isReport && hasPointComparison && result.wholeRoundFeedback && <h2>AI 对照结果</h2>}
       {hasPointComparison && (isComparison || isReport) && <div class="comparison-grid">
@@ -314,8 +317,10 @@ export const ComparisonView = defineComponent((props: ComparisonProps) => {
       {isReport && <a class="report-download" download="回声训练室-轮次报告.txt" href={`data:text/plain;charset=utf-8,${encodeURIComponent(
         ['回声训练室 · 本轮报告', ...(seats ?? []), `完整度 ${result.complete}/${result.total}`, `准确度 ${result.accurate}/${result.total}`,
           ...(!anonymous && result.wholeRoundFeedback ? [
-            `复述偏差：${result.wholeRoundFeedback.retellTags.join('、') || '无标注'}`,
-            `表达问题：${result.wholeRoundFeedback.expressionTags.join('、') || '无标注'}`,
+            ...(result.wholeRoundFeedback.accuratePointIds == null ? [] :
+              [`人工标注的准确复述要点：${accuratePointSummary(result.wholeRoundFeedback, result.issues)}`]),
+            `给复述者贴的标签：${result.wholeRoundFeedback.retellTags.join('、') || '无标注'}`,
+            `表达者自我评价：${result.wholeRoundFeedback.expressionTags.join('、') || '无标注'}`,
             ...(result.wholeRoundFeedback.note ? [`澄清：${result.wholeRoundFeedback.note}`] : []),
           ] : []),
           ...(result.excluded ? [`${result.excluded} 条未达成一致，不计入本轮结果。`] : []),

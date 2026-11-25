@@ -3,7 +3,7 @@ import { boundedFetch, newRequestId, type PracticeAdvice } from './client.ts';
 import { Recorder } from './Recorder.tsx';
 import { AudioPlayer } from './AudioPlayer.tsx';
 import { MaterialConsentButton } from './MaterialConsentButton.tsx';
-import { RoundLabelFields, emptyLabels, feedbackSummary } from './RoundFeedback.tsx';
+import { AccuratePointFields, RoundLabelFields, emptyLabels, feedbackSummary } from './RoundFeedback.tsx';
 import { roundTopics } from './flow.ts';
 import { comparePractice, type PracticeComparisonItem } from './practice-comparison.ts';
 import materials from './practice-materials.json' with { type: 'json' };
@@ -82,6 +82,7 @@ export const SoloPractice = defineComponent({
       return preview?.kind === 'manual' ? preview.transcript : analysis.value?.transcript;
     });
     const labels = ref(emptyLabels());
+    const accuratePointIds = ref<string[]>([]);
     const note = ref('');
     const accepted = ref(false);
     const archiving = ref(false);
@@ -140,6 +141,7 @@ export const SoloPractice = defineComponent({
       localPreview.value = null;
       attemptId = '';
       labels.value = emptyLabels();
+      accuratePointIds.value = [];
       note.value = '';
       retellRecording = audio;
       retellPreviewUrl.value = URL.createObjectURL(audio);
@@ -246,7 +248,7 @@ export const SoloPractice = defineComponent({
       const path = `/api/practice/analysis/${finished.id}`;
       try {
         const submitted = await boundedFetch(path + '/round-feedback', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ...labels.value, note: note.value.trim() }), signal: controller.signal });
+          body: JSON.stringify({ ...labels.value, accuratePointIds: accuratePointIds.value, note: note.value.trim() }), signal: controller.signal });
         if (!submitted.ok) throw new Error();
         coaching.value = await submitted.json() as PracticeAdvice;
         if (controller.signal.aborted) return;
@@ -303,6 +305,7 @@ export const SoloPractice = defineComponent({
       manualTranscript.value = '';
       localPreview.value = null;
       labels.value = emptyLabels();
+      accuratePointIds.value = [];
       note.value = '';
       accepted.value = false;
       archiveError.value = '';
@@ -443,6 +446,8 @@ export const SoloPractice = defineComponent({
             <p>{transcript.value || '本轮没有转写。'}</p>
           </section>
         </div>
+        <AccuratePointFields points={result.value?.rows ?? []} selected={accuratePointIds.value} disabled={reviewBusy.value}
+          onChange={value => { accuratePointIds.value = value; }} />
         <RoundLabelFields value={labels.value} disabled={reviewBusy.value} onChange={value => { labels.value = value; }} />
         <label>补充澄清（选填）<textarea name="clarification" rows={4} maxlength={500} value={note.value}
           onInput={event => { note.value = (event.currentTarget as HTMLTextAreaElement).value; }} /></label>
@@ -494,7 +499,7 @@ export const SoloPractice = defineComponent({
           <summary>{index + 1}. {item.tag || '差异'}</summary>
           {pairedText(item, retellLabel)}
         </details>)}
-        {feedbackSummary({ ...labels.value, note: note.value.trim() })}
+        {feedbackSummary({ ...labels.value, accuratePointIds: accuratePointIds.value, note: note.value.trim() }, comparison?.rows ?? [])}
         {!preview && <p><strong>{accepted.value ? '已接纳改写建议' : '本轮跳过改写建议'}</strong></p>}
         {accepted.value && <p>{coaching.value?.suggestions.listener?.text}</p>}
         <button type="button" class="primary" onClick={() => go(1)}>再练一轮</button>

@@ -9,6 +9,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.Semaphore;
+import java.util.stream.Collectors;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -42,7 +43,7 @@ class SoloPracticeAnalysis {
                 String provider, String failure) {}
     private record Job(String id, String owner, String material, int duration, String status,
                        byte[] transcript, byte[] result, String audioKey, boolean submitted, String providerTask,
-                       String failure, Instant created) {}
+                       String failure, Instant created, byte[] wholeRoundFeedback) {}
     record ReviewChoice(String issueId, String resolution) {}
     private record Lease(Job job, String token) {}
 
@@ -162,14 +163,30 @@ class SoloPracticeAnalysis {
         return result;
     }
 
-    CoachingAdvice.View submitWholeReview(String id, String owner, WholeRoundFeedback feedback) {
+    CoachingAdvice.View submitWholeReview(String id, String owner, WholeRoundFeedback labels, List<String> accuratePointIds) {
         var job = owned(id, owner);
         if (!"ready".equals(job.status())) throw new ApiFailure(409, "SOLO_NOT_READY");
-        var evidence = result(job).comparison().issues().stream()
+        var comparison = result(job).comparison();
+        var pointIds = comparison.rows().stream().map(SoloPracticeScoring.Item::id).collect(Collectors.toSet());
+        var feedback = labels.withAccuratePoints(accuratePointIds, pointIds);
+        var evidence = comparison.issues().stream()
                 .map(issue -> new ArkComparison.CoachingEvidence(issue.id(), issue.original(), issue.retell(), "system_detected"))
                 .toList();
-        coaching.enqueue("solo:" + id, evidence, List.of("listener"), feedback);
-        return coaching.view("solo:" + id);
+        var archiveFeedback = new WholeRoundFeedback(feedback.retellTags(), feedback.expressionTags(), "", feedback.accuratePointIds());
+        return tx.execute(ignored -> {
+            db.update("UPDATE solo_analysis SET whole_round_feedback=? WHERE id=? AND whole_round_feedback IS NULL",
+                    sealFeedback(id, archiveFeedback), id);
+            coaching.enqueue("solo:" + id, evidence, List.of("listener"), feedback);
+            return coaching.view("solo:" + id);
+        });
+    }
+
+    private byte[] sealFeedback(String id, WholeRoundFeedback feedback) {
+        try {
+            return vault.seal("solo-feedback:" + id, json.writeValueAsString(feedback));
+        } catch (JsonProcessingException error) {
+            throw new UncheckedIOException(error);
+        }
     }
 
     void archive(String id, String owner, boolean accepted) {
@@ -178,10 +195,10 @@ class SoloPracticeAnalysis {
         var scores = result(job).comparison();
         db.update("""
             INSERT INTO single_practice_reports
-              (session_id, id, material_id, duration_seconds, transcript_source, complete, accurate, total, accepted)
-            VALUES (?,?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE id=id
+              (session_id, id, material_id, duration_seconds, transcript_source, complete, accurate, total, accepted, whole_round_feedback)
+            VALUES (?,?,?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE id=id
             """, owner, id, job.material(), job.duration(), "asr", scores.complete(), scores.accurate(),
-                scores.total(), accepted);
+                scores.total(), accepted, job.wholeRoundFeedback());
     }
 
     @Scheduled(fixedDelayString = "${echo.processing.solo-delay-ms:1000}",
@@ -298,7 +315,8 @@ class SoloPracticeAnalysis {
         return new Job(rs.getString("id"), rs.getString("session_id"), rs.getString("material_id"),
                 rs.getInt("duration_seconds"), rs.getString("status"), rs.getBytes("transcript"),
                 rs.getBytes("result"), rs.getString("audio_key"), rs.getBoolean("provider_started"),
-                rs.getString("provider_task"), rs.getString("failure"), rs.getTimestamp("created_at").toInstant());
+                rs.getString("provider_task"), rs.getString("failure"), rs.getTimestamp("created_at").toInstant(),
+                rs.getBytes("whole_round_feedback"));
     }
 
     private static ApiFailure missing() { return new ApiFailure(404, "SOLO_ANALYSIS_NOT_FOUND"); }

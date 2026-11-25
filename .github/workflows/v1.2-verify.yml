@@ -67,7 +67,7 @@ jobs:
         env:
           ECHO_TEST_FFMPEG: /usr/bin/ffmpeg
         run: mvn --batch-mode --no-transfer-progress --settings server-java/maven-settings.xml --file server-java/pom.xml verify
-      - name: Verify five training modes in Chromium
+      - name: Verify four training modes in Chromium
         timeout-minutes: 10
         env:
           ECHO_PRODUCT_ORIGIN: http://localhost:3121
