@@ -150,7 +150,7 @@ const TrainingApp = defineComponent(() => {
   return () => {
     const showHome = session.value && !selected.value && !inRoom.value && !historyOpen.value;
     return <div class="shell">
-      <header class="top"><span class="mark" aria-hidden="true">↗</span><strong>蜗牛回声训练室</strong><span class="status">V1.2.2</span></header>
+      <header class="top"><span class="mark" aria-hidden="true">↗</span><strong>蜗牛回声训练室</strong><span class="status">V1.2.3</span></header>
       <main>
         {!window.isSecureContext && <p role="alert" class="notice">请通过 HTTPS 打开训练室，才能使用麦克风。</p>}
         {!session.value && <section class="login-screen" aria-labelledby="login-title">
